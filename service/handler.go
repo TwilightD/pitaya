@@ -277,6 +277,7 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 		h.processMessage(a, msg)
 
 	case packet.Heartbeat:
+		logger.Log.Debug("[HBD]Receive heartbeat packet")
 		// expected
 	}
 
