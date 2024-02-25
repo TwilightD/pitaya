@@ -238,6 +238,14 @@ func (m *MockSession) GetLastTime() int64 {
 	return ret0
 }
 
+// GetCreatedTime
+func (m *MockSession) GetCreatedTime() int64 {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetCreatedTime")
+	ret0, _ := ret[0].(int64)
+	return ret0
+}
+
 // HasKey mocks base method.
 func (m *MockSession) HasKey(arg0 string) bool {
 	m.ctrl.T.Helper()

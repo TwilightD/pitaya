@@ -87,6 +87,7 @@ type sessionImpl struct {
 	id                  int64                                 // session global unique id
 	uid                 string                                // binding user id
 	lastTime            int64                                 // last heartbeat time
+	createdTime         int64                                 // session creation time
 	entity              networkentity.NetworkEntity           // low-level network entity
 	data                map[string]interface{}                // session data store
 	handshakeData       *HandshakeData                        // handshake data received by the client
@@ -161,6 +162,7 @@ type Session interface {
 	GetHandshakeValidators() map[string]func(data *HandshakeData) error
 	SetLastTime()
 	GetLastTime() int64
+	GetCreatedTime() int64
 }
 
 type sessionIDService struct {
@@ -181,13 +183,15 @@ func (c *sessionIDService) sessionID() int64 {
 // NewSession returns a new session instance
 // a networkentity.NetworkEntity is a low-level network instance
 func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, frontend bool, UID ...string) Session {
+	unixTime := time.Now().Unix()
 	s := &sessionImpl{
 		id:                  pool.sessionIDSvc.sessionID(),
 		entity:              entity,
 		data:                make(map[string]interface{}),
 		handshakeData:       nil,
 		handshakeValidators: pool.handshakeValidators,
-		lastTime:            time.Now().Unix(),
+		lastTime:            unixTime,
+		createdTime:         unixTime,
 		OnCloseCallbacks:    []func(){},
 		IsFrontend:          frontend,
 		pool:                pool,
@@ -877,4 +881,8 @@ func (s *sessionImpl) SetLastTime() {
 
 func (s *sessionImpl) GetLastTime() int64 {
 	return s.lastTime
+}
+
+func (s *sessionImpl) GetCreatedTime() int64 {
+	return s.createdTime
 }
