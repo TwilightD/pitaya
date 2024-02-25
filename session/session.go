@@ -159,6 +159,8 @@ type Session interface {
 	GetHandshakeData() *HandshakeData
 	ValidateHandshake(data *HandshakeData) error
 	GetHandshakeValidators() map[string]func(data *HandshakeData) error
+	SetLastTime()
+	GetLastTime() int64
 }
 
 type sessionIDService struct {
@@ -867,4 +869,12 @@ func (s *sessionImpl) SetRequestInFlight(reqID string, reqData string, inFlight 
 		}
 	}
 	s.requestsInFlight.mu.Unlock()
+}
+
+func (s *sessionImpl) SetLastTime() {
+	s.lastTime = time.Now().Unix()
+}
+
+func (s *sessionImpl) GetLastTime() int64 {
+	return s.lastTime
 }

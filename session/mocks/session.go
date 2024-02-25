@@ -230,6 +230,14 @@ func (mr *MockSessionMockRecorder) GetSubscriptions() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetSubscriptions", reflect.TypeOf((*MockSession)(nil).GetSubscriptions))
 }
 
+// GetLastTime
+func (m *MockSession) GetLastTime() int64 {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetLastTime")
+	ret0, _ := ret[0].(int64)
+	return ret0
+}
+
 // HasKey mocks base method.
 func (m *MockSession) HasKey(arg0 string) bool {
 	m.ctrl.T.Helper()
@@ -557,6 +565,12 @@ func (m *MockSession) SetSubscriptions(arg0 []*nats.Subscription) {
 func (mr *MockSessionMockRecorder) SetSubscriptions(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSubscriptions", reflect.TypeOf((*MockSession)(nil).SetSubscriptions), arg0)
+}
+
+// SetLastTime
+func (m *MockSession) SetLastTime() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetLastTime")
 }
 
 // String mocks base method.

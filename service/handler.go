@@ -281,6 +281,7 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 	}
 
 	a.SetLastAt()
+	a.GetSession().SetLastTime()
 	return nil
 }
 
