@@ -22,6 +22,7 @@ package pipeline
 
 import (
 	"context"
+	"reflect"
 
 	"github.com/topfreegames/pitaya/v2/logger"
 )
@@ -49,6 +50,7 @@ type (
 	Hooks struct {
 		BeforeHandler *Channel
 		AfterHandler  *AfterChannel
+		PcallWrapper  func(method reflect.Method, args []reflect.Value) (rets interface{}, err error)
 	}
 
 	HandlerHooks struct {
