@@ -92,7 +92,12 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		args = append(args, reflect.ValueOf(arg))
 	}
 
-	resp, err := util.Pcall(handler.Method, args)
+	var resp interface{}
+	if handlerHooks.Hooks.PcallWrapper != nil {
+		resp, err = handlerHooks.Hooks.PcallWrapper(handler.Method, args)
+	} else {
+		resp, err = util.Pcall(handler.Method, args)
+	}
 	if remote && msgType == message.Notify {
 		// This is a special case and should only happen with nats rpc client
 		// because we used nats request we have to answer to it or else a timeout
