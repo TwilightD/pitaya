@@ -348,6 +348,7 @@ func (h *HandlerService) localProcess(ctx context.Context, a agent.Agent, route 
 			a.AnswerWithError(ctx, mid, err)
 		} else {
 			err := a.GetSession().ResponseMID(ctx, mid, ret)
+			err = a.GetSession().ResponseMID(ctx, mid, ret)
 			if err != nil {
 				logger.Log.Errorf("Failed to process handler message: %s", err.Error())
 				tracing.FinishSpan(ctx, err)
