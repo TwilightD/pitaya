@@ -175,10 +175,7 @@ func (h *HandlerService) Handle(conn acceptor.PlayerConn) {
 
 	// guarantee agent related resource is destroyed
 	defer func() {
-		// if session has already closed, return
-		if session.GetSessionByID(a.GetSession().ID()) != nil {
-			a.GetSession().Close()
-		}
+		a.GetSession().Close()
 		logger.Log.Debugf("Session read goroutine exit, SessionID=%d, UID=%s", a.GetSession().ID(), a.GetSession().UID())
 	}()
 
