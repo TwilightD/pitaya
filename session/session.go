@@ -488,7 +488,10 @@ func (s *sessionImpl) Close() {
 		return
 	}
 
+	// 打印会话数量
+	logger.Log.Debugf("closing session %d, session count: %d", s.ID(), s.pool.SessionCount)
 	atomic.AddInt64(&s.pool.SessionCount, -1)
+	logger.Log.Debugf("session count after closing: %d", s.pool.SessionCount)
 	s.pool.sessionsByID.Delete(s.ID())
 	// Only remove session by UID if the session ID matches the one being closed. This avoids problems with removing a valid session after the user has already reconnected before this session's heartbeat times out
 	if val, ok := s.pool.sessionsByUID.Load(s.UID()); ok {
