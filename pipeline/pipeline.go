@@ -25,6 +25,7 @@ import (
 	"reflect"
 
 	"github.com/topfreegames/pitaya/v2/logger"
+	"github.com/topfreegames/pitaya/v2/serialize"
 )
 
 type (
@@ -50,7 +51,7 @@ type (
 	Hooks struct {
 		BeforeHandler *Channel
 		AfterHandler  *AfterChannel
-		PcallWrapper  func(method reflect.Method, args []reflect.Value) (rets interface{}, err error)
+		PcallWrapper  func(method reflect.Method, args []reflect.Value, serializer serialize.Serializer) (rets interface{}, serRet []byte, err error)
 	}
 
 	HandlerHooks struct {
