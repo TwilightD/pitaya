@@ -114,14 +114,16 @@ func (h *HandlerPool) ProcessHandlerMessage(
 	}
 
 	var ret []byte
-	if pcallSerRet == nil {
-		ret, err = serializeReturn(serializer, resp)
-		if err != nil {
-			logger.Errorf("method %s failed to serialize return, error: %s", handler.Method, err.Error())
-			return nil, err
+	if msgType != message.Notify {
+		if pcallSerRet == nil {
+			ret, err = serializeReturn(serializer, resp)
+			if err != nil {
+				logger.Errorf("method %s failed to serialize return, error: %s", handler.Method, err.Error())
+				return nil, err
+			}
+		} else {
+			ret = pcallSerRet
 		}
-	} else {
-		ret = pcallSerRet
 	}
 
 	return ret, nil
