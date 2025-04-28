@@ -90,10 +90,10 @@ func serializeReturn(ser serialize.Serializer, ret interface{}) ([]byte, error) 
 	res, err := util.SerializeOrRaw(ser, ret)
 	if err != nil {
 		logger.Log.Errorf("Failed to serialize return: %s", err.Error())
-		if res == nil {
-			logger.Log.Error("failed to serialize return, but res is nil")
+		if ret == nil {
+			logger.Log.Error("failed to serialize return, ret is nil")
 		} else {
-			logger.Log.Errorf("failed to serialize return, res type is: %s, res value is: %#v", reflect.TypeOf(res), res)
+			logger.Log.Errorf("failed to serialize return, ret type is: %s, ret value is: %#v", reflect.TypeOf(ret), ret)
 		}
 
 		return nil, e.NewError(err, "PIT-000")
