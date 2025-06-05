@@ -64,6 +64,7 @@ type SessionPool interface {
 	OnSessionClose(f func(s Session))
 	CloseAll()
 	AddHandshakeValidator(name string, f func(data *HandshakeData) error)
+	GetNumberOfConnectedClients() int64
 }
 
 // HandshakeClientData represents information about the client sent on the handshake.
@@ -310,6 +311,11 @@ func (pool *sessionPoolImpl) AddHandshakeValidator(name string, f func(data *Han
 	pool.handshakeValidators[name] = f
 }
 
+// GetNumberOfConnectedClients returns the number of connected clients
+func (pool *sessionPoolImpl) GetNumberOfConnectedClients() int64 {
+	return pool.GetSessionCount()
+}
+
 func (s *sessionImpl) updateEncodedData() error {
 	var b []byte
 	b, err := json.Marshal(s.data)
@@ -467,7 +473,9 @@ func (s *sessionImpl) Kick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return s.entity.Close()
+
+	s.Close()
+	return nil
 }
 
 // OnClose adds the function it receives to the callbacks that will be called
@@ -483,13 +491,9 @@ func (s *sessionImpl) OnClose(c func()) error {
 // Close terminates current session, session related data will not be released,
 // all related data should be cleared explicitly in Session closed callback
 func (s *sessionImpl) Close() {
-	// if the session already closed, return
-	if _, ok := s.pool.sessionsByID.Load(s.ID()); !ok {
-		return
+	if _, ok := s.pool.sessionsByID.LoadAndDelete(s.ID()); ok {
+		atomic.AddInt64(&s.pool.SessionCount, -1)
 	}
-
-	atomic.AddInt64(&s.pool.SessionCount, -1)
-	s.pool.sessionsByID.Delete(s.ID())
 	// Only remove session by UID if the session ID matches the one being closed. This avoids problems with removing a valid session after the user has already reconnected before this session's heartbeat times out
 	if val, ok := s.pool.sessionsByUID.Load(s.UID()); ok {
 		if (val.(Session)).ID() == s.ID() {

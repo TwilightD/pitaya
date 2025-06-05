@@ -70,6 +70,7 @@ const (
 
 // Pitaya App interface
 type Pitaya interface {
+	// GetDieChan gets the channel that the app sinalizes when its going to die.
 	GetDieChan() chan bool
 	SetDebug(debug bool)
 	SetHeartbeatTime(interval time.Duration)
@@ -125,6 +126,8 @@ type Pitaya interface {
 	RegisterModuleAfter(module interfaces.Module, name string) error
 	RegisterModuleBefore(module interfaces.Module, name string) error
 	GetModule(name string) (interfaces.Module, error)
+
+	GetNumberOfConnectedClients() int64
 }
 
 // App is the base app struct
@@ -155,6 +158,8 @@ type App struct {
 	sessionModulesArr []sessionModuleWrapper
 	groups            groups.GroupService
 	sessionPool       session.SessionPool
+	externalDieChan   chan bool
+	sgChan            chan os.Signal
 }
 
 // NewApp is the base constructor for a pitaya app instance
@@ -201,6 +206,8 @@ func NewApp(
 		modulesArr:        []moduleWrapper{},
 		sessionModulesArr: []sessionModuleWrapper{},
 		sessionPool:       sessionPool,
+		externalDieChan:   make(chan bool),
+		sgChan:            make(chan os.Signal, 1),
 	}
 	if app.heartbeat == time.Duration(0) {
 		app.heartbeat = config.Heartbeat.Interval
@@ -210,9 +217,9 @@ func NewApp(
 	return app
 }
 
-// GetDieChan gets the channel that the app sinalizes when its going to die
+// GetDieChan gets the channel that the app sinalizes when its going to die.
 func (app *App) GetDieChan() chan bool {
-	return app.dieChan
+	return app.externalDieChan
 }
 
 // SetDebug toggles debug on/off
@@ -322,8 +329,7 @@ func (app *App) Start() {
 		app.running = false
 	}()
 
-	sg := make(chan os.Signal)
-	signal.Notify(sg, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGKILL, syscall.SIGTERM)
+	signal.Notify(app.sgChan, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 
 	maxSessionCount := func() int64 {
 		count := app.sessionPool.GetSessionCount()
@@ -338,7 +344,7 @@ func (app *App) Start() {
 	select {
 	case <-app.dieChan:
 		logger.Log.Warn("the app will shutdown in a few seconds")
-	case s := <-sg:
+	case s := <-app.sgChan:
 		logger.Log.Warn("got signal: ", s, ", shutting down...")
 		if app.config.Session.Drain.Enabled && s == syscall.SIGTERM {
 			logger.Log.Info("Session drain is enabled, draining all sessions before shutting down")
@@ -351,7 +357,7 @@ func (app *App) Start() {
 					break loop
 				}
 				select {
-				case s := <-sg:
+				case s := <-app.sgChan:
 					logger.Log.Warn("got signal: ", s)
 					if s == syscall.SIGINT {
 						logger.Log.Warnf("Bypassing session draing due to SIGINT. %d sessions will be immediately terminated", maxSessionCount())
@@ -365,8 +371,11 @@ func (app *App) Start() {
 				}
 			}
 		}
-		close(app.dieChan)
 	}
+
+	app.Shutdown()
+	close(app.externalDieChan)
+	close(app.sgChan)
 
 	logger.Log.Warn("server is stopping...")
 
@@ -552,4 +561,9 @@ func (app *App) StartWorker() {
 func (app *App) RegisterRPCJob(rpcJob worker.RPCJob) error {
 	err := app.worker.RegisterRPCJob(rpcJob)
 	return err
+}
+
+// GetNumberOfConnectedClients returns the number of connected clients
+func (app *App) GetNumberOfConnectedClients() int64 {
+	return app.sessionPool.GetSessionCount()
 }

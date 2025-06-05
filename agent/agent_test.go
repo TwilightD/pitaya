@@ -22,17 +22,23 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
+	"net"
+	"os"
 	"reflect"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/golang/mock/gomock"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/topfreegames/pitaya/v2/conn/codec"
 	codecmocks "github.com/topfreegames/pitaya/v2/conn/codec/mocks"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	messagemocks "github.com/topfreegames/pitaya/v2/conn/message/mocks"
@@ -45,6 +51,7 @@ import (
 	metricsmocks "github.com/topfreegames/pitaya/v2/metrics/mocks"
 	"github.com/topfreegames/pitaya/v2/mocks"
 	"github.com/topfreegames/pitaya/v2/protos"
+	"github.com/topfreegames/pitaya/v2/serialize"
 	serializemocks "github.com/topfreegames/pitaya/v2/serialize/mocks"
 	"github.com/topfreegames/pitaya/v2/session"
 )
@@ -77,6 +84,7 @@ func TestNewAgent(t *testing.T) {
 	mockDecoder := codecmocks.NewMockPacketDecoder(ctrl)
 	dieChan := make(chan bool)
 	hbTime := time.Second
+	writeTimeout := time.Second
 
 	mockConn := mocks.NewMockPlayerConn(ctrl)
 
@@ -95,7 +103,7 @@ func TestNewAgent(t *testing.T) {
 	sessionPool := session.NewSessionPool()
 
 	mockMetricsReporter.EXPECT().ReportGauge(metrics.ConnectedClients, gomock.Any(), gomock.Any())
-	ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, 10, dieChan, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
+	ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, writeTimeout, 10, dieChan, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
 	assert.NotNil(t, ag)
 	assert.IsType(t, make(chan struct{}), ag.chDie)
 	assert.IsType(t, make(chan pendingWrite), ag.chSend)
@@ -106,7 +114,7 @@ func TestNewAgent(t *testing.T) {
 	assert.Equal(t, mockConn, ag.conn)
 	assert.Equal(t, mockDecoder, ag.decoder)
 	assert.Equal(t, mockEncoder, ag.encoder)
-	assert.Equal(t, hbTime, ag.heartbeatTimeout)
+	assert.Equal(t, hbTime, writeTimeout, ag.heartbeatTimeout)
 	assert.InDelta(t, time.Now().Unix(), ag.lastAt, 1)
 	assert.Equal(t, mockSerializer, ag.serializer)
 	assert.Equal(t, mockMetricsReporters, ag.metricsReporters)
@@ -116,7 +124,7 @@ func TestNewAgent(t *testing.T) {
 
 	// second call should no call hdb encode
 	mockMetricsReporter.EXPECT().ReportGauge(metrics.ConnectedClients, gomock.Any(), gomock.Any())
-	ag = newAgent(nil, nil, mockEncoder, mockSerializer, hbTime, 10, dieChan, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
+	ag = newAgent(nil, nil, mockEncoder, mockSerializer, hbTime, writeTimeout, 10, dieChan, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
 	assert.NotNil(t, ag)
 }
 
@@ -129,22 +137,169 @@ func TestKick(t *testing.T) {
 	mockDecoder := codecmocks.NewMockPacketDecoder(ctrl)
 	dieChan := make(chan bool)
 	hbTime := time.Second
+	writeTimeout := time.Second
 
 	mockConn := mocks.NewMockPlayerConn(ctrl)
+
+	// Mock the handshake and heartbeat encoding that happens during agent creation
+	heartbeatAndHandshakeMocks(mockEncoder)
+
 	mockEncoder.EXPECT().Encode(gomock.Any(), gomock.Nil()).Do(
 		func(typ packet.Type, d []byte) {
 			assert.EqualValues(t, packet.Kick, typ)
 		})
+	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
 	mockConn.EXPECT().Write(gomock.Any()).Return(0, nil)
+
+	// Mock RemoteAddr calls that happen in createConnectionSpan
+	mockConn.EXPECT().RemoteAddr().AnyTimes().Return(&mockAddr{})
+
+	messageEncoder := message.NewMessagesEncoder(false)
+	mockSerializer.EXPECT().GetName()
+
+	sessionPool := session.NewSessionPool()
+	ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, writeTimeout, 10, dieChan, messageEncoder, nil, sessionPool)
+	c := context.Background()
+	err := ag.Kick(c)
+	assert.NoError(t, err)
+}
+
+func TestKickWriteError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSerializer := serializemocks.NewMockSerializer(ctrl)
+	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
+	mockDecoder := codecmocks.NewMockPacketDecoder(ctrl)
+	dieChan := make(chan bool)
+	hbTime := time.Second
+	writeTimeout := time.Second
+
+	mockConn := mocks.NewMockPlayerConn(ctrl)
+
+	// Mock the handshake and heartbeat encoding that happens during agent creation
+	heartbeatAndHandshakeMocks(mockEncoder)
+
+	mockEncoder.EXPECT().Encode(gomock.Any(), gomock.Any()).Return([]byte{}, nil).AnyTimes()
+	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
+	mockConn.EXPECT().Write(gomock.Any()).Return(0, assert.AnError)
+
+	// Mock RemoteAddr calls that happen in createConnectionSpan
+	mockConn.EXPECT().RemoteAddr().AnyTimes().Return(&mockAddr{})
+
+	messageEncoder := message.NewMessagesEncoder(false)
+	mockSerializer.EXPECT().GetName()
+
+	sessionPool := session.NewSessionPool()
+	ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, writeTimeout, 10, dieChan, messageEncoder, nil, sessionPool)
+	c := context.Background()
+	err := ag.Kick(c)
+	assert.Contains(t, err.Error(), assert.AnError.Error())
+}
+
+func TestKickEncodeError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSerializer := serializemocks.NewMockSerializer(ctrl)
+	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
+	mockDecoder := codecmocks.NewMockPacketDecoder(ctrl)
+	dieChan := make(chan bool)
+	hbTime := time.Second
+	writeTimeout := time.Second
+
+	mockConn := mocks.NewMockPlayerConn(ctrl)
+
+	// We need to add explicit expectations for these encode calls as they are called by newAgent with once.Do(). So these calls might not happen when running multiple tests simultaneously.
+	mockEncoder.EXPECT().Encode(packet.Type(packet.Handshake), gomock.Any()).Return([]byte{}, nil).AnyTimes()
+	mockEncoder.EXPECT().Encode(packet.Type(packet.Heartbeat), gomock.Any()).Return([]byte{}, nil).AnyTimes()
+	mockEncoder.EXPECT().Encode(packet.Type(packet.Kick), nil).Return(nil, assert.AnError)
 	messageEncoder := message.NewMessagesEncoder(false)
 
 	mockSerializer.EXPECT().GetName()
 
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, 10, dieChan, messageEncoder, nil, sessionPool)
+	ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, writeTimeout, 10, dieChan, messageEncoder, nil, sessionPool)
 	c := context.Background()
 	err := ag.Kick(c)
-	assert.NoError(t, err)
+	assert.ErrorIs(t, err, assert.AnError)
+}
+
+func TestKickNetworkErrors(t *testing.T) {
+	table := []struct {
+		name          string
+		writeError    error
+		expectedError string
+	}{
+		{
+			name:          "net.ErrClosed should return ErrClientClosedRequest",
+			writeError:    net.ErrClosed,
+			expectedError: e.ErrClientClosedRequest,
+		},
+		{
+			name:          "os.ErrDeadlineExceeded should return ErrRequestTimeout",
+			writeError:    os.ErrDeadlineExceeded,
+			expectedError: e.ErrRequestTimeout,
+		},
+		{
+			name:          "syscall.EPIPE should return ErrClosedRequest",
+			writeError:    &net.OpError{Err: syscall.EPIPE},
+			expectedError: e.ErrClosedRequest,
+		},
+		{
+			name:          "syscall.ECONNRESET should return ErrClientClosedRequest",
+			writeError:    &net.OpError{Err: syscall.ECONNRESET},
+			expectedError: e.ErrClientClosedRequest,
+		},
+		{
+			name:          "generic error should return ErrClosedRequest",
+			writeError:    assert.AnError,
+			expectedError: e.ErrClosedRequest,
+		},
+	}
+
+	for _, row := range table {
+		t.Run(row.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockSerializer := serializemocks.NewMockSerializer(ctrl)
+			mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
+			mockDecoder := codecmocks.NewMockPacketDecoder(ctrl)
+			dieChan := make(chan bool)
+			hbTime := time.Second
+			writeTimeout := time.Second
+
+			mockConn := mocks.NewMockPlayerConn(ctrl)
+
+			// Mock the handshake and heartbeat encoding that happens during agent creation
+			heartbeatAndHandshakeMocks(mockEncoder)
+
+			// Mock the kick packet encoding
+			mockEncoder.EXPECT().Encode(packet.Type(packet.Kick), nil).Return([]byte{}, nil)
+
+			// Mock the write operation that will fail
+			mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
+			mockConn.EXPECT().Write(gomock.Any()).Return(0, row.writeError)
+
+			// Mock RemoteAddr calls that happen in createConnectionSpan
+			mockConn.EXPECT().RemoteAddr().AnyTimes().Return(&mockAddr{})
+
+			messageEncoder := message.NewMessagesEncoder(false)
+			mockSerializer.EXPECT().GetName()
+
+			sessionPool := session.NewSessionPool()
+			ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, writeTimeout, 10, dieChan, messageEncoder, nil, sessionPool)
+			c := context.Background()
+			err := ag.Kick(c)
+
+			// Verify that the error is wrapped with the expected Pitaya error code
+			var pitayaErr *e.Error
+			assert.True(t, errors.As(err, &pitayaErr))
+			assert.Equal(t, row.expectedError, pitayaErr.Code)
+			assert.Contains(t, err.Error(), row.writeError.Error())
+		})
+	}
 }
 
 func TestAgentSend(t *testing.T) {
@@ -153,7 +308,10 @@ func TestAgentSend(t *testing.T) {
 		err  error
 	}{
 		{"success", nil},
-		{"failure", e.NewError(constants.ErrBrokenPipe, e.ErrClientClosedRequest)},
+		{"failure", e.NewError(
+			fmt.Errorf("%s: send on closed channel", constants.ErrBrokenPipe.Error()),
+			e.ErrClientClosedRequest,
+		)},
 	}
 
 	for _, table := range tables {
@@ -167,12 +325,13 @@ func TestAgentSend(t *testing.T) {
 			mockDecoder := codecmocks.NewMockPacketDecoder(ctrl)
 			dieChan := make(chan bool)
 			hbTime := time.Second
+			writeTimeout := time.Second
 			messageEncoder := message.NewMessagesEncoder(false)
 
 			mockConn := mocks.NewMockPlayerConn(ctrl)
 			mockSerializer.EXPECT().GetName()
 			sessionPool := session.NewSessionPool()
-			ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, 10, dieChan, messageEncoder, nil, sessionPool).(*agentImpl)
+			ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, writeTimeout, 10, dieChan, messageEncoder, nil, sessionPool).(*agentImpl)
 			assert.NotNil(t, ag)
 
 			if table.err != nil {
@@ -258,12 +417,14 @@ func TestAgentSendSerializeErr(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	mockConn.EXPECT().RemoteAddr().Times(2).Return(&mockAddr{})
+	mockConn.EXPECT().RemoteAddr().AnyTimes().Return(&mockAddr{})
+	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
 	mockConn.EXPECT().Write(expectedPacket).Do(func(b []byte) {
 		wg.Done()
 	})
 	go ag.write()
 	mockMetricsReporter.EXPECT().ReportGauge(gomock.Any(), gomock.Any(), gomock.Any())
+	mockMetricsReporter.EXPECT().ReportHistogram(gomock.Any(), gomock.Any(), gomock.Any())
 	ag.send(expected)
 	wg.Wait()
 
@@ -281,7 +442,7 @@ func TestAgentPushFailsIfClosedAgent(t *testing.T) {
 	messageEncoder := message.NewMessagesEncoder(false)
 
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(nil, nil, mockEncoder, mockSerializer, time.Second, 10, nil, messageEncoder, nil, sessionPool).(*agentImpl)
+	ag := newAgent(nil, nil, mockEncoder, mockSerializer, time.Second, time.Second, 10, nil, messageEncoder, nil, sessionPool).(*agentImpl)
 	assert.NotNil(t, ag)
 	ag.state = constants.StatusClosed
 	err := ag.Push("", nil)
@@ -308,6 +469,7 @@ func TestAgentPushStruct(t *testing.T) {
 			mockDecoder := codecmocks.NewMockPacketDecoder(ctrl)
 			dieChan := make(chan bool)
 			hbTime := time.Second
+			writeTimeout := time.Second
 			messageEncoder := message.NewMessagesEncoder(false)
 			mockMetricsReporter := metricsmocks.NewMockReporter(ctrl)
 			mockConn := mocks.NewMockPlayerConn(ctrl)
@@ -315,7 +477,7 @@ func TestAgentPushStruct(t *testing.T) {
 			mockMetricsReporter.EXPECT().ReportGauge(metrics.ConnectedClients, gomock.Any(), gomock.Any())
 			mockSerializer.EXPECT().GetName()
 			sessionPool := session.NewSessionPool()
-			ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, 10, dieChan, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
+			ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, writeTimeout, 10, dieChan, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
 			assert.NotNil(t, ag)
 
 			expectedBytes := []byte("hello")
@@ -335,6 +497,7 @@ func TestAgentPushStruct(t *testing.T) {
 			}
 
 			mockMetricsReporter.EXPECT().ReportGauge(metrics.ChannelCapacity, gomock.Any(), float64(10))
+			mockMetricsReporter.EXPECT().ReportHistogram(metrics.ChannelCapacityHistogram, gomock.Any(), float64(10))
 			err = ag.Push(msg.Route, table.data)
 			assert.Equal(t, table.err, err)
 
@@ -353,7 +516,10 @@ func TestAgentPush(t *testing.T) {
 		err  error
 	}{
 		{"success_raw", []byte("ok"), nil},
-		{"failure", []byte("ok"), e.NewError(constants.ErrBrokenPipe, e.ErrClientClosedRequest)},
+		{"failure", []byte("ok"), e.NewError(
+			fmt.Errorf("%s: send on closed channel", constants.ErrBrokenPipe.Error()),
+			e.ErrClientClosedRequest,
+		)},
 	}
 
 	for _, table := range tables {
@@ -367,6 +533,7 @@ func TestAgentPush(t *testing.T) {
 			mockDecoder := codecmocks.NewMockPacketDecoder(ctrl)
 			dieChan := make(chan bool)
 			hbTime := time.Second
+			writeTimeout := time.Second
 			messageEncoder := message.NewMessagesEncoder(false)
 			mockMetricsReporter := metricsmocks.NewMockReporter(ctrl)
 			mockConn := mocks.NewMockPlayerConn(ctrl)
@@ -374,7 +541,7 @@ func TestAgentPush(t *testing.T) {
 			mockMetricsReporter.EXPECT().ReportGauge(metrics.ConnectedClients, gomock.Any(), gomock.Any())
 			mockSerializer.EXPECT().GetName()
 			sessionPool := session.NewSessionPool()
-			ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, 10, dieChan, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
+			ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, writeTimeout, 10, dieChan, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
 			assert.NotNil(t, ag)
 
 			expectedBytes := []byte("hello")
@@ -393,6 +560,7 @@ func TestAgentPush(t *testing.T) {
 			}
 
 			mockMetricsReporter.EXPECT().ReportGauge(metrics.ChannelCapacity, gomock.Any(), float64(10))
+			mockMetricsReporter.EXPECT().ReportHistogram(metrics.ChannelCapacityHistogram, gomock.Any(), float64(10))
 			err = ag.Push(msg.Route, table.data)
 			assert.Equal(t, table.err, err)
 
@@ -414,6 +582,7 @@ func TestAgentPushFullChannel(t *testing.T) {
 	mockDecoder := codecmocks.NewMockPacketDecoder(ctrl)
 	dieChan := make(chan bool)
 	hbTime := time.Second
+	writeTimeout := time.Second
 	messageEncoder := message.NewMessagesEncoder(false)
 	mockMetricsReporter := metricsmocks.NewMockReporter(ctrl)
 	mockConn := mocks.NewMockPlayerConn(ctrl)
@@ -421,10 +590,11 @@ func TestAgentPushFullChannel(t *testing.T) {
 	mockMetricsReporter.EXPECT().ReportGauge(metrics.ConnectedClients, gomock.Any(), gomock.Any())
 	mockSerializer.EXPECT().GetName()
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, 0, dieChan, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
+	ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, writeTimeout, 0, dieChan, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
 	assert.NotNil(t, ag)
 
 	mockMetricsReporter.EXPECT().ReportGauge(metrics.ChannelCapacity, gomock.Any(), float64(0))
+	mockMetricsReporter.EXPECT().ReportHistogram(metrics.ChannelCapacityHistogram, gomock.Any(), float64(0))
 
 	msg := &message.Message{
 		Route: "route",
@@ -457,7 +627,7 @@ func TestAgentResponseMIDFailsIfClosedAgent(t *testing.T) {
 	mockMetricsReporters := []metrics.Reporter{mockMetricsReporter}
 	mockMetricsReporter.EXPECT().ReportGauge(metrics.ConnectedClients, gomock.Any(), gomock.Any())
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(nil, nil, mockEncoder, mockSerializer, time.Second, 10, nil, mockMessageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
+	ag := newAgent(nil, nil, mockEncoder, mockSerializer, time.Second, time.Second, 10, nil, mockMessageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
 	assert.NotNil(t, ag)
 	ag.state = constants.StatusClosed
 
@@ -478,8 +648,10 @@ func TestAgentResponseMID(t *testing.T) {
 		{"success_raw_msg_err", uint(rand.Int()), []byte("ok"), true, nil},
 		{"success_struct", uint(rand.Int()), &someStruct{A: "ok"}, false, nil},
 		{"failure_empty_mid", 0, []byte("ok"), false, constants.ErrSessionOnNotify},
-		{"failure_send", uint(rand.Int()), []byte("ok"), false,
-			e.NewError(constants.ErrBrokenPipe, e.ErrClientClosedRequest)},
+		{"failure_send", uint(rand.Int()), []byte("ok"), false, e.NewError(
+			fmt.Errorf("%s: send on closed channel", constants.ErrBrokenPipe.Error()),
+			e.ErrClientClosedRequest,
+		)},
 	}
 
 	for _, table := range tables {
@@ -494,6 +666,7 @@ func TestAgentResponseMID(t *testing.T) {
 			mockDecoder := codecmocks.NewMockPacketDecoder(ctrl)
 			dieChan := make(chan bool)
 			hbTime := time.Second
+			writeTimeout := time.Second
 			messageEncoder := message.NewMessagesEncoder(false)
 
 			mockConn := mocks.NewMockPlayerConn(ctrl)
@@ -501,13 +674,14 @@ func TestAgentResponseMID(t *testing.T) {
 			mockMetricsReporter.EXPECT().ReportGauge(metrics.ConnectedClients, gomock.Any(), gomock.Any())
 			mockSerializer.EXPECT().GetName()
 			sessionPool := session.NewSessionPool()
-			ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, 10, dieChan, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
+			ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, writeTimeout, 10, dieChan, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
 			assert.NotNil(t, ag)
 
 			ctx := getCtxWithRequestKeys()
 			if table.mid != 0 {
 				mockEncoder.EXPECT().Encode(gomock.Any(), gomock.Any()).Return([]byte("ok!"), nil)
 				mockMetricsReporter.EXPECT().ReportGauge(metrics.ChannelCapacity, gomock.Any(), float64(10))
+				mockMetricsReporter.EXPECT().ReportHistogram(metrics.ChannelCapacityHistogram, gomock.Any(), float64(10))
 			}
 			if table.mid != 0 {
 				if table.err != nil {
@@ -520,6 +694,7 @@ func TestAgentResponseMID(t *testing.T) {
 			expected := pendingWrite{ctx: ctx, data: []byte("ok!"), err: nil}
 			var err error
 			if table.msgErr {
+				mockSerializer.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).Return(nil)
 				err = ag.ResponseMID(ctx, table.mid, table.data, table.msgErr)
 			} else {
 				err = ag.ResponseMID(ctx, table.mid, table.data)
@@ -548,6 +723,7 @@ func TestAgentResponseMIDFullChannel(t *testing.T) {
 	mockDecoder := codecmocks.NewMockPacketDecoder(ctrl)
 	dieChan := make(chan bool)
 	hbTime := time.Second
+	writeTimeout := time.Second
 	messageEncoder := message.NewMessagesEncoder(false)
 	mockMetricsReporter := metricsmocks.NewMockReporter(ctrl)
 	mockConn := mocks.NewMockPlayerConn(ctrl)
@@ -556,9 +732,10 @@ func TestAgentResponseMIDFullChannel(t *testing.T) {
 	mockSerializer.EXPECT().GetName()
 	mockEncoder.EXPECT().Encode(packet.Type(packet.Data), gomock.Any())
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, 0, dieChan, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
+	ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, writeTimeout, 0, dieChan, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
 	assert.NotNil(t, ag)
 	mockMetricsReporters[0].(*metricsmocks.MockReporter).EXPECT().ReportGauge(metrics.ChannelCapacity, gomock.Any(), float64(0))
+	mockMetricsReporters[0].(*metricsmocks.MockReporter).EXPECT().ReportHistogram(metrics.ChannelCapacityHistogram, gomock.Any(), float64(0))
 	go func() {
 		err := ag.ResponseMID(nil, 1, []byte("data"))
 		assert.NoError(t, err)
@@ -577,7 +754,7 @@ func TestAgentCloseFailsIfAlreadyClosed(t *testing.T) {
 	mockSerializer.EXPECT().GetName()
 
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(nil, nil, mockEncoder, mockSerializer, time.Second, 10, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
+	ag := newAgent(nil, nil, mockEncoder, mockSerializer, time.Second, time.Second, 10, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
 	assert.NotNil(t, ag)
 	ag.state = constants.StatusClosed
 	err := ag.Close()
@@ -596,7 +773,7 @@ func TestAgentClose(t *testing.T) {
 	mockSerializer.EXPECT().GetName()
 
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
+	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
 	assert.NotNil(t, ag)
 
 	expected := false
@@ -621,7 +798,7 @@ func TestAgentClose(t *testing.T) {
 		}
 	}()
 
-	mockConn.EXPECT().RemoteAddr()
+	mockConn.EXPECT().RemoteAddr().AnyTimes().Return(&mockAddr{})
 	mockConn.EXPECT().Close()
 	err = ag.Close()
 	assert.NoError(t, err)
@@ -644,11 +821,11 @@ func TestAgentRemoteAddr(t *testing.T) {
 	mockSerializer.EXPECT().GetName()
 
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool)
+	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool)
 	assert.NotNil(t, ag)
 
 	expected := &mockAddr{}
-	mockConn.EXPECT().RemoteAddr().Return(expected)
+	mockConn.EXPECT().RemoteAddr().AnyTimes().Return(expected)
 	addr := ag.RemoteAddr()
 	assert.Equal(t, expected, addr)
 }
@@ -665,10 +842,10 @@ func TestAgentString(t *testing.T) {
 	mockSerializer.EXPECT().GetName()
 
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
+	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
 	assert.NotNil(t, ag)
 
-	mockConn.EXPECT().RemoteAddr().Return(&mockAddr{})
+	mockConn.EXPECT().RemoteAddr().AnyTimes().Return(&mockAddr{})
 	expected := fmt.Sprintf("Remote=remote-string, LastTime=%d", ag.lastAt)
 	str := ag.String()
 	assert.Equal(t, expected, str)
@@ -697,7 +874,7 @@ func TestAgentGetStatus(t *testing.T) {
 			mockSerializer.EXPECT().GetName()
 
 			sessionPool := session.NewSessionPool()
-			ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
+			ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
 			assert.NotNil(t, ag)
 
 			ag.state = table.status
@@ -719,7 +896,7 @@ func TestAgentSetLastAt(t *testing.T) {
 	mockSerializer.EXPECT().GetName()
 
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(nil, nil, mockEncoder, mockSerializer, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
+	ag := newAgent(nil, nil, mockEncoder, mockSerializer, time.Second, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
 	assert.NotNil(t, ag)
 
 	ag.lastAt = 0
@@ -748,7 +925,7 @@ func TestAgentSetStatus(t *testing.T) {
 			mockSerializer.EXPECT().GetName()
 
 			sessionPool := session.NewSessionPool()
-			ag := newAgent(nil, nil, mockEncoder, mockSerializer, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
+			ag := newAgent(nil, nil, mockEncoder, mockSerializer, time.Second, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
 			assert.NotNil(t, ag)
 
 			ag.SetStatus(table.status)
@@ -766,7 +943,7 @@ func TestOnSessionClosed(t *testing.T) {
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
 	mockSerializer.EXPECT().GetName()
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(nil, nil, mockEncoder, mockSerializer, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
+	ag := newAgent(nil, nil, mockEncoder, mockSerializer, time.Second, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
 
 	ss := sessionPool.NewSession(nil, true)
 
@@ -788,7 +965,7 @@ func TestOnSessionClosedRecoversIfPanic(t *testing.T) {
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
 	mockSerializer.EXPECT().GetName()
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(nil, nil, mockEncoder, mockSerializer, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
+	ag := newAgent(nil, nil, mockEncoder, mockSerializer, time.Second, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
 
 	ss := sessionPool.NewSession(nil, true)
 
@@ -826,7 +1003,7 @@ func TestAgentSendHandshakeResponse(t *testing.T) {
 			mockSerializer.EXPECT().GetName()
 
 			sessionPool := session.NewSessionPool()
-			ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool)
+			ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool)
 			assert.NotNil(t, ag)
 
 			mockConn.EXPECT().Write(hrd).Return(0, table.err)
@@ -837,19 +1014,39 @@ func TestAgentSendHandshakeResponse(t *testing.T) {
 }
 
 func TestAnswerWithError(t *testing.T) {
-	tables := []struct {
+	unknownError := e.NewError(errors.New(""), e.ErrUnknownCode)
+	table := []struct {
 		name          string
+		answeredErr   error
+		encoderErr    error
 		getPayloadErr error
-		resErr        error
-		err           error
+		expectedErr   error
 	}{
-		{"success", nil, nil, nil},
-		{"failure_get_payload", errors.New("serialize err"), nil, errors.New("serialize err")},
-		{"failure_response_mid", nil, errors.New("responsemid err"), errors.New("responsemid err")},
+		{
+			name:          "should succeed with unknown error",
+			answeredErr:   assert.AnError,
+			encoderErr:    nil,
+			getPayloadErr: nil,
+			expectedErr:   unknownError,
+		},
+		{
+			name:          "should not answer if fails to get payload",
+			answeredErr:   assert.AnError,
+			encoderErr:    nil,
+			getPayloadErr: errors.New("serialize err"),
+			expectedErr:   nil,
+		},
+		{
+			name:          "should not answer if fails to send",
+			answeredErr:   assert.AnError,
+			encoderErr:    assert.AnError,
+			getPayloadErr: nil,
+			expectedErr:   nil,
+		},
 	}
 
-	for _, table := range tables {
-		t.Run(table.name, func(t *testing.T) {
+	for _, row := range table {
+		t.Run(row.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 
@@ -859,17 +1056,96 @@ func TestAnswerWithError(t *testing.T) {
 			messageEncoder := message.NewMessagesEncoder(false)
 			mockSerializer.EXPECT().GetName()
 			sessionPool := session.NewSessionPool()
-			ag := newAgent(nil, nil, mockEncoder, mockSerializer, time.Second, 1, nil, messageEncoder, nil, sessionPool).(*agentImpl)
+			ag := newAgent(nil, nil, mockEncoder, mockSerializer, time.Second, time.Second, 1, nil, messageEncoder, nil, sessionPool).(*agentImpl)
 			assert.NotNil(t, ag)
 
-			mockSerializer.EXPECT().Marshal(gomock.Any()).Return(nil, table.getPayloadErr)
-			if table.getPayloadErr == nil {
-				mockEncoder.EXPECT().Encode(packet.Type(packet.Data), gomock.Any())
+			mockSerializer.EXPECT().Marshal(gomock.Any()).Return(nil, row.getPayloadErr).AnyTimes()
+			mockSerializer.EXPECT().Unmarshal(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+			mockEncoder.EXPECT().Encode(packet.Type(packet.Data), gomock.Any()).Return(nil, row.encoderErr).AnyTimes()
+
+			ag.AnswerWithError(nil, uint(rand.Int()), row.answeredErr)
+			if row.expectedErr != nil {
+				pWrite := helpers.ShouldEventuallyReceive(t, ag.chSend)
+				assert.Equal(t, pendingWrite{err: row.expectedErr}, pWrite)
 			}
-			ag.AnswerWithError(nil, uint(rand.Int()), errors.New("something went wrong"))
-			if table.err == nil {
-				helpers.ShouldEventuallyReceive(t, ag.chSend)
-			}
+		})
+	}
+}
+
+type customSerializer struct{}
+
+func (*customSerializer) Marshal(obj interface{}) ([]byte, error) { return json.Marshal(obj) }
+func (*customSerializer) Unmarshal(data []byte, obj interface{}) error {
+	return json.Unmarshal(data, obj)
+}
+func (*customSerializer) GetName() string { return "custom" }
+
+func TestAgentAnswerWithError(t *testing.T) {
+	jsonSerializer, err := serialize.NewSerializer(serialize.JSON)
+	require.NoError(t, err)
+
+	protobufSerializer, err := serialize.NewSerializer(serialize.PROTOBUF)
+	require.NoError(t, err)
+
+	customSerializer := &customSerializer{}
+
+	table := []struct {
+		name        string
+		answeredErr error
+		serializer  serialize.Serializer
+		expectedErr error
+	}{
+		{
+			name:        "should return unknown code for generic error and JSON serializer",
+			answeredErr: assert.AnError,
+			serializer:  jsonSerializer,
+			expectedErr: e.NewError(assert.AnError, e.ErrUnknownCode),
+		},
+		{
+			name:        "should return custom code for pitaya error and JSON serializer",
+			answeredErr: e.NewError(assert.AnError, "CUSTOM-123"),
+			serializer:  jsonSerializer,
+			expectedErr: e.NewError(assert.AnError, "CUSTOM-123"),
+		},
+		{
+			name:        "should return unknown code for generic error and Protobuf serializer",
+			answeredErr: assert.AnError,
+			serializer:  protobufSerializer,
+			expectedErr: e.NewError(assert.AnError, e.ErrUnknownCode),
+		},
+		{
+			name:        "should return custom code for pitaya error and Protobuf serializer",
+			answeredErr: e.NewError(assert.AnError, "CUSTOM-123"),
+			serializer:  protobufSerializer,
+			expectedErr: e.NewError(assert.AnError, "CUSTOM-123"),
+		},
+		{
+			name:        "should return unknown code for generic error and custom serializer",
+			answeredErr: assert.AnError,
+			serializer:  customSerializer,
+			expectedErr: e.NewError(assert.AnError, e.ErrUnknownCode),
+		},
+		{
+			name:        "should return custom code for pitaya error and custom serializer",
+			answeredErr: e.NewError(assert.AnError, "CUSTOM-123"),
+			serializer:  customSerializer,
+			expectedErr: e.NewError(assert.AnError, "CUSTOM-123"),
+		},
+	}
+
+	for _, row := range table {
+		t.Run(row.name, func(t *testing.T) {
+			encoder := codec.NewPomeloPacketEncoder()
+
+			messageEncoder := message.NewMessagesEncoder(false)
+			sessionPool := session.NewSessionPool()
+			ag := newAgent(nil, nil, encoder, row.serializer, time.Second, time.Second, 1, nil, messageEncoder, nil, sessionPool).(*agentImpl)
+			assert.NotNil(t, ag)
+
+			ag.AnswerWithError(nil, uint(rand.Int()), row.answeredErr)
+
+			pWrite := helpers.ShouldEventuallyReceive(t, ag.chSend)
+			assert.Equal(t, row.expectedErr, pWrite.(pendingWrite).err)
 		})
 	}
 }
@@ -882,13 +1158,13 @@ func TestAgentHeartbeat(t *testing.T) {
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
 	heartbeatAndHandshakeMocks(mockEncoder)
 	mockConn := mocks.NewMockPlayerConn(ctrl)
-	mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
+	messageEncoder := message.NewMessagesEncoder(false)
 	mockSerializer.EXPECT().GetName()
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, 1*time.Second, 1, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
+	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, 1*time.Second, time.Second, 1, nil, messageEncoder, nil, sessionPool).(*agentImpl)
 	assert.NotNil(t, ag)
 
-	mockConn.EXPECT().RemoteAddr().MaxTimes(1)
+	mockConn.EXPECT().RemoteAddr().AnyTimes().Return(&mockAddr{})
 	mockConn.EXPECT().Close().MaxTimes(1)
 
 	die := false
@@ -917,13 +1193,13 @@ func TestAgentHeartbeatExitsIfConnError(t *testing.T) {
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
 	heartbeatAndHandshakeMocks(mockEncoder)
 	mockConn := mocks.NewMockPlayerConn(ctrl)
-	mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
+	messageEncoder := message.NewMessagesEncoder(false)
 	mockSerializer.EXPECT().GetName()
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, 1*time.Second, 1, nil, mockMessageEncoder, nil, sessionPool).(*agentImpl)
+	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, 1*time.Second, time.Second, 1, nil, messageEncoder, nil, sessionPool).(*agentImpl)
 	assert.NotNil(t, ag)
 
-	mockConn.EXPECT().RemoteAddr().MaxTimes(1)
+	mockConn.EXPECT().RemoteAddr().AnyTimes().Return(&mockAddr{})
 	mockConn.EXPECT().Close().MaxTimes(1)
 
 	die := false
@@ -955,12 +1231,12 @@ func TestAgentHeartbeatExitsOnStopHeartbeat(t *testing.T) {
 	mockConn := mocks.NewMockPlayerConn(ctrl)
 	messageEncoder := message.NewMessagesEncoder(false)
 
-	mockConn.EXPECT().RemoteAddr().MaxTimes(1)
+	mockConn.EXPECT().RemoteAddr().AnyTimes().Return(&mockAddr{})
 	mockConn.EXPECT().Close().MaxTimes(1)
 
 	mockSerializer.EXPECT().GetName()
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, 1*time.Second, 1, nil, messageEncoder, nil, sessionPool).(*agentImpl)
+	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, 1*time.Second, time.Second, 1, nil, messageEncoder, nil, sessionPool).(*agentImpl)
 	assert.NotNil(t, ag)
 
 	go func() {
@@ -990,6 +1266,7 @@ func TestAgentWriteChSend(t *testing.T) {
 		serializer:       mockSerializer,
 		messageEncoder:   messageEncoder,
 		metricsReporters: mockMetricsReporters,
+		writeTimeout:     time.Second,
 	}
 	ctx := getCtxWithRequestKeys()
 	mockMetricsReporters[0].(*metricsmocks.MockReporter).EXPECT().ReportSummary(metrics.ResponseTime, gomock.Any(), gomock.Any())
@@ -998,7 +1275,8 @@ func TestAgentWriteChSend(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	mockConn.EXPECT().RemoteAddr().Times(2).Return(&mockAddr{})
+	mockConn.EXPECT().RemoteAddr().AnyTimes().Return(&mockAddr{})
+	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
 	mockConn.EXPECT().Write(expectedPacket).Do(func(b []byte) {
 		time.Sleep(10 * time.Millisecond)
 		wg.Done()
@@ -1019,7 +1297,7 @@ func TestAgentHandle(t *testing.T) {
 	messageEncoder := message.NewMessagesEncoder(false)
 	mockSerializer.EXPECT().GetName()
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, 1*time.Second, 1, nil, messageEncoder, nil, sessionPool).(*agentImpl)
+	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, 1*time.Second, time.Second, 1, nil, messageEncoder, nil, sessionPool).(*agentImpl)
 	assert.NotNil(t, ag)
 
 	expectedBytes := []byte("bla")
@@ -1038,12 +1316,13 @@ func TestAgentHandle(t *testing.T) {
 		}
 	}()
 
+	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil).Times(3)
 	mockConn.EXPECT().Write(expectedBytes).Return(0, nil).Do(func(d []byte) {
 		wg.Done()
 	})
 
 	// ag.Close on method exit
-	mockConn.EXPECT().RemoteAddr().MaxTimes(1)
+	mockConn.EXPECT().RemoteAddr().AnyTimes().Return(&mockAddr{})
 	mockConn.EXPECT().Close().MaxTimes(1)
 
 	ag.chSend <- pendingWrite{ctx: nil, data: expectedBytes, err: nil}
@@ -1064,6 +1343,7 @@ func TestNatsRPCServerReportMetrics(t *testing.T) {
 	mockDecoder := codecmocks.NewMockPacketDecoder(ctrl)
 	dieChan := make(chan bool)
 	hbTime := time.Second
+	writeTimeout := time.Second
 	messageEncoder := message.NewMessagesEncoder(false)
 	mockMetricsReporter := metricsmocks.NewMockReporter(ctrl)
 	mockMetricsReporters := []metrics.Reporter{mockMetricsReporter}
@@ -1071,7 +1351,7 @@ func TestNatsRPCServerReportMetrics(t *testing.T) {
 	mockMetricsReporter.EXPECT().ReportGauge(metrics.ConnectedClients, gomock.Any(), gomock.Any())
 	mockSerializer.EXPECT().GetName()
 	sessionPool := session.NewSessionPool()
-	ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, 10, dieChan, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
+	ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, writeTimeout, 10, dieChan, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
 	assert.NotNil(t, ag)
 
 	ag.messagesBufferSize = 0
@@ -1079,6 +1359,7 @@ func TestNatsRPCServerReportMetrics(t *testing.T) {
 	ag.chSend <- pendingWrite{}
 
 	mockMetricsReporter.EXPECT().ReportGauge(metrics.ChannelCapacity, gomock.Any(), float64(-1)) // because buffersize is 0 and chan sz is 1
+	mockMetricsReporter.EXPECT().ReportHistogram(metrics.ChannelCapacityHistogram, gomock.Any(), float64(-1))
 	ag.reportChannelSize()
 }
 
@@ -1105,7 +1386,7 @@ func TestIPVersion(t *testing.T) {
 			mockConn := mocks.NewMockPlayerConn(ctrl)
 			mockAddr := &customMockAddr{str: table.addr}
 
-			mockConn.EXPECT().RemoteAddr().Return(mockAddr)
+			mockConn.EXPECT().RemoteAddr().AnyTimes().Return(mockAddr)
 			a := &agentImpl{conn: mockConn}
 
 			assert.Equal(t, table.ipVersion, a.IPVersion())
@@ -1121,6 +1402,8 @@ func TestAgentWriteChSendWriteError(t *testing.T) {
 	mockSerializer.EXPECT().GetName()
 
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
+	heartbeatAndHandshakeMocks(mockEncoder)
+
 	mockConn := mocks.NewMockPlayerConn(ctrl)
 	messageEncoder := message.NewMessagesEncoder(false)
 	mockMetricsReporter := metricsmocks.NewMockReporter(ctrl)
@@ -1129,7 +1412,7 @@ func TestAgentWriteChSendWriteError(t *testing.T) {
 	mockMetricsReporters := []metrics.Reporter{mockMetricsReporter}
 	sessionPool := session.NewSessionPool()
 
-	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, 0, nil, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
+	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, time.Second, 0, nil, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
 
 	ctx := getCtxWithRequestKeys()
 
@@ -1149,15 +1432,65 @@ func TestAgentWriteChSendWriteError(t *testing.T) {
 	mockMetricsReporter.EXPECT().ReportGauge(metrics.ConnectedClients, gomock.Any(), gomock.Any())
 	mockMetricsReporter.EXPECT().ReportSummary(metrics.ResponseTime, errorTags, gomock.Any())
 
-	mockConn.EXPECT().RemoteAddr().Return(&mockAddr{}).Times(3)
+	mockConn.EXPECT().RemoteAddr().AnyTimes().Return(&mockAddr{}).Times(4)
 	mockConn.EXPECT().Close().Do(func() {
 		wg.Done()
 	})
+	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
 	mockConn.EXPECT().Write(expectedPacket).Do(func(b []byte) {
 		wg.Done()
 	}).Return(0, writeError)
 
 	go ag.write()
 	ag.chSend <- pendingWrite{ctx: ctx, data: expectedPacket, err: nil}
+	wg.Wait()
+}
+
+func TestAgentWriteChSendWriteTimeout(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSerializer := serializemocks.NewMockSerializer(ctrl)
+	mockSerializer.EXPECT().GetName()
+
+	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
+	heartbeatAndHandshakeMocks(mockEncoder)
+
+	mockConn := mocks.NewMockPlayerConn(ctrl)
+	messageEncoder := message.NewMessagesEncoder(false)
+	mockMetricsReporter := metricsmocks.NewMockReporter(ctrl)
+	mockMetricsReporter.EXPECT().ReportGauge(metrics.ConnectedClients, gomock.Any(), gomock.Any())
+
+	mockMetricsReporters := []metrics.Reporter{mockMetricsReporter}
+	sessionPool := session.NewSessionPool()
+
+	writeTimeout := 10 * time.Millisecond
+
+	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, writeTimeout, 0, nil, messageEncoder, mockMetricsReporters, sessionPool).(*agentImpl)
+
+	ctx := getCtxWithRequestKeys()
+
+	expectedFirstPacket := []byte("first")
+	expectedSecondPacket := []byte("final")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	mockMetricsReporter.EXPECT().ReportSummary(metrics.ResponseTime, gomock.Any(), gomock.Any()).Times(2)
+
+	mockConn.EXPECT().RemoteAddr().AnyTimes().Return(&mockAddr{}).Times(5)
+	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil).Times(2)
+	mockConn.EXPECT().Write(expectedFirstPacket).Do(func(b []byte) {
+		time.Sleep(writeTimeout * 2)
+		wg.Done()
+	}).Return(0, os.ErrDeadlineExceeded)
+
+	mockConn.EXPECT().Write(expectedSecondPacket).Do(func(b []byte) {
+		wg.Done()
+	}).Return(0, nil)
+
+	go ag.write()
+	ag.chSend <- pendingWrite{ctx: ctx, data: expectedFirstPacket, err: nil}
+	ag.chSend <- pendingWrite{ctx: ctx, data: expectedSecondPacket, err: nil}
 	wg.Wait()
 }

@@ -26,11 +26,14 @@ import (
 	e "errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
+	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/conn/codec"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/conn/packet"
@@ -76,6 +79,7 @@ type (
 		decoder            codec.PacketDecoder // binary decoder
 		encoder            codec.PacketEncoder // binary encoder
 		heartbeatTimeout   time.Duration
+		writeTimeout       time.Duration
 		lastAt             int64 // last heartbeat unix time stamp
 		messageEncoder     message.Encoder
 		messagesBufferSize int // size of the pending messages buffer
@@ -130,6 +134,7 @@ type (
 		decoder            codec.PacketDecoder // binary decoder
 		encoder            codec.PacketEncoder // binary encoder
 		heartbeatTimeout   time.Duration
+		writeTimeout       time.Duration
 		messageEncoder     message.Encoder
 		messagesBufferSize int // size of the pending messages buffer
 		metricsReporters   []metrics.Reporter
@@ -144,6 +149,7 @@ func NewAgentFactory(
 	encoder codec.PacketEncoder,
 	serializer serialize.Serializer,
 	heartbeatTimeout time.Duration,
+	writeTimeout time.Duration,
 	messageEncoder message.Encoder,
 	messagesBufferSize int,
 	sessionPool session.SessionPool,
@@ -154,6 +160,7 @@ func NewAgentFactory(
 		decoder:            decoder,
 		encoder:            encoder,
 		heartbeatTimeout:   heartbeatTimeout,
+		writeTimeout:       writeTimeout,
 		messageEncoder:     messageEncoder,
 		messagesBufferSize: messagesBufferSize,
 		sessionPool:        sessionPool,
@@ -164,7 +171,7 @@ func NewAgentFactory(
 
 // CreateAgent returns a new agent
 func (f *agentFactoryImpl) CreateAgent(conn net.Conn) Agent {
-	return newAgent(conn, f.decoder, f.encoder, f.serializer, f.heartbeatTimeout, f.messagesBufferSize, f.appDieChan, f.messageEncoder, f.metricsReporters, f.sessionPool)
+	return newAgent(conn, f.decoder, f.encoder, f.serializer, f.heartbeatTimeout, f.writeTimeout, f.messagesBufferSize, f.appDieChan, f.messageEncoder, f.metricsReporters, f.sessionPool)
 }
 
 // NewAgent create new agent instance
@@ -174,6 +181,7 @@ func newAgent(
 	packetEncoder codec.PacketEncoder,
 	serializer serialize.Serializer,
 	heartbeatTime time.Duration,
+	writeTimeout time.Duration,
 	messagesBufferSize int,
 	dieChan chan bool,
 	messageEncoder message.Encoder,
@@ -183,10 +191,15 @@ func newAgent(
 	// initialize heartbeat and handshake data on first user connection
 	serializerName := serializer.GetName()
 
+	// TODO: Remove this once.Do and move the validation somewhere else, maybe during pitaya initialization. The current approach makes tests interfere with each other quite easily.
 	once.Do(func() {
 		hbdEncode(heartbeatTime, packetEncoder, messageEncoder.IsCompressionEnabled(), serializerName)
 		herdEncode(heartbeatTime, packetEncoder, messageEncoder.IsCompressionEnabled(), serializerName)
 	})
+
+	if writeTimeout <= 0 {
+		writeTimeout = config.DefaultWriteTimeout
+	}
 
 	a := &agentImpl{
 		appDieChan:         dieChan,
@@ -199,6 +212,7 @@ func newAgent(
 		decoder:            packetDecoder,
 		encoder:            packetEncoder,
 		heartbeatTimeout:   heartbeatTime,
+		writeTimeout:       writeTimeout,
 		lastAt:             time.Now().Unix(),
 		serializer:         serializer,
 		state:              constants.StatusStart,
@@ -251,20 +265,32 @@ func (a *agentImpl) packetEncodeMessage(m *message.Message) ([]byte, error) {
 
 func (a *agentImpl) send(pendingMsg pendingMessage) (err error) {
 	defer func() {
-		if e := recover(); e != nil {
-			err = errors.NewError(constants.ErrBrokenPipe, errors.ErrClientClosedRequest)
+		if panicErr := recover(); panicErr != nil {
+			err = errors.NewError(
+				fmt.Errorf("%s: %s", constants.ErrBrokenPipe.Error(), panicErr),
+				errors.ErrClientClosedRequest,
+			)
+			logger.Log.Error("agent send panicked: ", err)
 		}
 	}()
 	a.reportChannelSize()
 
 	m, err := a.getMessageFromPendingMessage(pendingMsg)
 	if err != nil {
+		logger.Log.Errorf(
+			"agent send failed when getting pending msg. route: %s, type: %s, err: %s",
+			pendingMsg.route, &pendingMsg.typ, err,
+		)
 		return err
 	}
 
 	// packet encode
 	p, err := a.packetEncodeMessage(m)
 	if err != nil {
+		logger.Log.Errorf(
+			"agent send failed when encoding the msg. route: %s, type: %s, err: %s",
+			pendingMsg.route, &pendingMsg.typ, err,
+		)
 		return err
 	}
 
@@ -296,14 +322,22 @@ func (a *agentImpl) Push(route string, v interface{}) error {
 		return errors.NewError(constants.ErrBrokenPipe, errors.ErrClientClosedRequest)
 	}
 
+	logger := logger.Log.WithFields(map[string]interface{}{
+		"type":       "Push",
+		"session_id": a.Session.ID(),
+		"uid":        a.Session.UID(),
+		"route":      route,
+	})
+
 	switch d := v.(type) {
 	case []byte:
-		logger.Log.Debugf("Type=Push, ID=%d, UID=%s, Route=%s, Data=%dbytes",
-			a.Session.ID(), a.Session.UID(), route, len(d))
+		logger = logger.WithField("bytes", len(d))
 	default:
-		logger.Log.Debugf("Type=Push, ID=%d, UID=%s, Route=%s, Data=%+v",
-			a.Session.ID(), a.Session.UID(), route, v)
+		logger = logger.WithField("data", fmt.Sprintf("%+v", d))
 	}
+
+	logger.Debugf("pushing message to session")
+
 	return a.send(pendingMessage{typ: message.Push, route: route, payload: v})
 }
 
@@ -322,14 +356,21 @@ func (a *agentImpl) ResponseMID(ctx context.Context, mid uint, v interface{}, is
 		return constants.ErrSessionOnNotify
 	}
 
+	logger := logger.Log.WithFields(map[string]interface{}{
+		"type":       "Push",
+		"session_id": a.Session.ID(),
+		"uid":        a.Session.UID(),
+		"mid":        mid,
+	})
+
 	switch d := v.(type) {
 	case []byte:
-		logger.Log.Debugf("Type=Response, ID=%d, UID=%s, MID=%d, Data=%dbytes",
-			a.Session.ID(), a.Session.UID(), mid, len(d))
+		logger = logger.WithField("bytes", len(d))
 	default:
-		logger.Log.Infof("Type=Response, ID=%d, UID=%s, MID=%d, Data=%+v",
-			a.Session.ID(), a.Session.UID(), mid, v)
+		logger = logger.WithField("data", fmt.Sprintf("%+v", d))
 	}
+
+	logger.Debugf("responding message to session")
 
 	return a.send(pendingMessage{ctx: ctx, typ: message.Response, mid: mid, payload: v, err: err})
 }
@@ -344,8 +385,11 @@ func (a *agentImpl) Close() error {
 	}
 	a.SetStatus(constants.StatusClosed)
 
-	logger.Log.Debugf("Session closed, ID=%d, UID=%s, IP=%s",
-		a.Session.ID(), a.Session.UID(), a.conn.RemoteAddr())
+	logger.Log.WithFields(map[string]interface{}{
+		"session_id":  a.Session.ID(),
+		"uid":         a.Session.UID(),
+		"remote_addr": a.conn.RemoteAddr().String(),
+	}).Debugf("Session closed")
 
 	// prevent closing closed channel
 	select {
@@ -384,10 +428,48 @@ func (a *agentImpl) Kick(ctx context.Context) error {
 	// packet encode
 	p, err := a.encoder.Encode(packet.Kick, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("agent kick encoding failed: %w", err)
 	}
-	_, err = a.conn.Write(p)
-	return err
+	if err := a.writeToConnection(ctx, p); err != nil {
+		// 1. Check for a closed connection (most likely scenario for a "dead connection")
+		if e.Is(err, net.ErrClosed) {
+			// Handle specifically: connection was already closed
+			// This could mean the client disconnected before the kick.
+			return errors.NewError(err, errors.ErrClientClosedRequest, map[string]string{
+				"reason": "agent kick failed: connection already closed",
+			})
+		}
+
+		// 2. Check for a timeout (if you have write deadlines)
+		if e.Is(err, os.ErrDeadlineExceeded) {
+			// Handle specifically: write operation timed out
+			return errors.NewError(err, errors.ErrRequestTimeout, map[string]string{
+				"reason": "agent kick failed: write timeout",
+			})
+		}
+
+		// 3. Unwrap OpError to check for specific syscall errors if needed
+		var opError *net.OpError
+		if e.As(err, &opError) {
+			if e.Is(opError.Err, syscall.EPIPE) {
+				// Handle specifically: broken pipe (often means client disconnected)
+				return errors.NewError(err, errors.ErrClosedRequest, map[string]string{
+					"reason": "agent kick failed: write timeout",
+				})
+			}
+			if e.Is(opError.Err, syscall.ECONNRESET) {
+				// Handle specifically: connection reset by peer
+				return errors.NewError(err, errors.ErrClientClosedRequest, map[string]string{
+					"reason": "agent kick failed: connection reset by peer",
+				})
+			}
+		}
+
+		return errors.NewError(err, errors.ErrClosedRequest, map[string]string{
+			"reason": "agent kick message failed",
+		})
+	}
+	return nil
 }
 
 // SetLastAt sets the last at to now
@@ -404,7 +486,10 @@ func (a *agentImpl) SetStatus(state int32) {
 func (a *agentImpl) Handle() {
 	defer func() {
 		a.Close()
-		logger.Log.Debugf("Session handle goroutine exit, SessionID=%d, UID=%s", a.Session.ID(), a.Session.UID())
+		logger.Log.WithFields(map[string]interface{}{
+			"session_id": a.Session.ID(),
+			"uid":        a.Session.UID(),
+		}).Debugf("Session handle goroutine exit")
 	}()
 
 	go a.write()
@@ -442,7 +527,13 @@ func (a *agentImpl) heartbeat() {
 		case <-ticker.C:
 			deadline := time.Now().Add(-2 * a.heartbeatTimeout).Unix()
 			if atomic.LoadInt64(&a.lastAt) < deadline {
-				logger.Log.Debugf("Session heartbeat timeout, LastTime=%d, Deadline=%d", atomic.LoadInt64(&a.lastAt), deadline)
+				logger.Log.WithFields(map[string]interface{}{
+					"session_id":  a.Session.ID(),
+					"uid":         a.Session.UID(),
+					"remote_addr": a.conn.RemoteAddr().String(),
+					"last_at":     atomic.LoadInt64(&a.lastAt),
+					"deadline":    deadline,
+				}).Debugf("Session heartbeat timeout")
 				return
 			}
 
@@ -503,19 +594,29 @@ func (a *agentImpl) write() {
 			ctx, err, data := pWrite.ctx, pWrite.err, pWrite.data
 
 			writeErr := a.writeToConnection(ctx, data)
-			if writeErr != nil {
-				err = errors.NewError(writeErr, errors.ErrClosedRequest)
-
-				logger.Log.Errorf("Failed to write in conn: %s (ctx=%v), agent will close", writeErr.Error(), ctx)
-			}
 
 			tracing.FinishSpan(ctx, nil)
-			metrics.ReportTimingFromCtx(ctx, a.metricsReporters, handlerType, err)
 
-			// close agent if low-level conn broke during write
 			if writeErr != nil {
-				return
+				if e.Is(writeErr, os.ErrDeadlineExceeded) {
+					// Log the timeout error but continue processing
+					logger.Log.Warnf(
+						"Context deadline exceeded for write in conn (%s) | session (%s): %s",
+						a.conn.RemoteAddr(), a.Session.UID(), writeErr.Error(),
+					)
+				} else {
+					err = errors.NewError(writeErr, errors.ErrClosedRequest)
+					logger.Log.Errorf(
+						"Failed to write in conn (%s) | session (%s): %s, agent will close",
+						a.conn.RemoteAddr(), a.Session.UID(), writeErr.Error(),
+					)
+					metrics.ReportTimingFromCtx(ctx, a.metricsReporters, handlerType, err)
+					// close agent if low-level conn broke during write
+					return
+				}
 			}
+
+			metrics.ReportTimingFromCtx(ctx, a.metricsReporters, handlerType, err)
 		case <-a.chStopWrite:
 			return
 		}
@@ -524,17 +625,15 @@ func (a *agentImpl) write() {
 
 func (a *agentImpl) writeToConnection(ctx context.Context, data []byte) error {
 	span := createConnectionSpan(ctx, a.conn, "conn write")
-
-	_, writeErr := a.conn.Write(data)
-
 	defer span.Finish()
 
+	a.conn.SetWriteDeadline(time.Now().Add(a.writeTimeout))
+	_, writeErr := a.conn.Write(data)
 	if writeErr != nil {
 		tracing.LogError(span, writeErr.Error())
 		return writeErr
 	}
-
-	return nil
+	return writeErr
 }
 
 func createConnectionSpan(ctx context.Context, conn net.Conn, op string) opentracing.Span {
@@ -549,7 +648,7 @@ func createConnectionSpan(ctx context.Context, conn net.Conn, op string) opentra
 
 	tags := opentracing.Tags{
 		"span.kind": "connection",
-		"addr": remoteAddress,
+		"addr":      remoteAddress,
 	}
 
 	var parent opentracing.SpanContext
@@ -664,7 +763,10 @@ func (a *agentImpl) reportChannelSize() {
 	}
 	for _, mr := range a.metricsReporters {
 		if err := mr.ReportGauge(metrics.ChannelCapacity, map[string]string{"channel": "agent_chsend"}, float64(chSendCapacity)); err != nil {
-			logger.Log.Warnf("failed to report chSend channel capaacity: %s", err.Error())
+			logger.Log.Warnf("failed to report gauge chSend channel capacity: %s", err.Error())
+		}
+		if err := mr.ReportHistogram(metrics.ChannelCapacityHistogram, map[string]string{"channel": "agent_chsend"}, float64(chSendCapacity)); err != nil {
+			logger.Log.Warnf("failed to report histogram chSend channel capacity: %s", err.Error())
 		}
 	}
 }

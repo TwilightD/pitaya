@@ -94,6 +94,10 @@ The configurations only need to be set if the RPC Service is enabled with the gi
     - Default value
     - Type
     - Description
+  * - pitaya.cluster.rpc.server.loopbackenabled
+    - false
+    - bool
+    - When enabled, allow to make RPC calls to the same pitaya server, which is not possible by default.
   * - pitaya.cluster.rpc.server.nats.buffer.messages
     - 75
     - int
@@ -130,6 +134,30 @@ The configurations only need to be set if the RPC Service is enabled with the gi
     - 15
     - int
     - Maximum number of retries to reconnect to nats for the client
+  * - pitaya.cluster.rpc.client.nats.websocketcompression
+    - true
+    - bool
+    - Enables compression in websocket connections to NATS. Needs both client and server to be enabled
+  * - pitaya.cluster.rpc.client.nats.reconnectjitter
+    - 100ms
+    - time.Time
+    - ReconnectJitter sets the upper bound for a random delay added to ReconnectWait during a reconnect when no TLS is used
+  * - pitaya.cluster.rpc.client.nats.reconnectjittertls
+    - 1s
+    - time.Time
+    - ReconnectJitterTLS sets the upper bound for a random delay added to ReconnectWait during a reconnect when TLS is used
+  * - pitaya.cluster.rpc.client.nats.reconnectwait
+    - 1s
+    - time.Time
+    - ReconnectWait sets the time to backoff after attempting to (and failing to) reconnect
+  * - pitaya.cluster.rpc.client.nats.pinginterval
+    - 2m
+    - time.Time
+    - PingInterval is the period at which the client will be sending ping commands to the server, disabled if 0 or negative
+  * - pitaya.cluster.rpc.client.nats.maxpingsoutstanding
+    - 3
+    - int
+    - MaxPingsOutstanding is the maximum number of pending ping commands that can be awaiting a response before raising an ErrStaleConnection error
   * - pitaya.cluster.rpc.server.nats.connect
     - nats://localhost:4222
     - string
@@ -142,6 +170,30 @@ The configurations only need to be set if the RPC Service is enabled with the gi
     - 15
     - int
     - Maximum number of retries to reconnect to nats for the server
+  * - pitaya.cluster.rpc.server.nats.websocketcompression
+    - true
+    - bool
+    - Enables compression in websocket connections to NATS. Needs both client and server to be enabled
+  * - pitaya.cluster.rpc.server.nats.reconnectjitter
+    - 100ms
+    - time.Time
+    - ReconnectJitter sets the upper bound for a random delay added to ReconnectWait during a reconnect when no TLS is used
+  * - pitaya.cluster.rpc.server.nats.reconnectjittertls
+    - 1s
+    - time.Time
+    - ReconnectJitterTLS sets the upper bound for a random delay added to ReconnectWait during a reconnect when TLS is used
+  * - pitaya.cluster.rpc.server.nats.reconnectwait
+    - 1s
+    - time.Time
+    - ReconnectWait sets the time to backoff after attempting to (and failing to) reconnect
+  * - pitaya.cluster.rpc.server.nats.pinginterval
+    - 2m
+    - time.Time
+    - PingInterval is the period at which the client will be sending ping commands to the server, disabled if 0 or negative
+  * - pitaya.cluster.rpc.server.nats.maxpingsoutstanding
+    - 3
+    - int
+    - MaxPingsOutstanding is the maximum number of pending ping commands that can be awaiting a response before raising an ErrStaleConnection error
   * - pitaya.cluster.rpc.server.grpc.port
     - 3434
     - int
@@ -215,6 +267,10 @@ Connection
     - 30s
     - time.Time
     - Keepalive heartbeat interval for the client connection
+  * - pitaya.buffer.agent.writetimeout
+    - 10s
+    - time.Duration
+    - Timeout for agent to send packets
   * - pitaya.conn.ratelimiting.interval
     - 1s
     - time.Duration
