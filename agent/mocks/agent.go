@@ -126,6 +126,14 @@ func (m *MockAgent) Kick(arg0 context.Context) error {
 	return ret0
 }
 
+// KickWithType mocks base method.
+func (m *MockAgent) KickWithType(arg0 context.Context, arg1 int32) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "KickWithType", arg0, arg1)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
 // Kick indicates an expected call of Kick.
 func (mr *MockAgentMockRecorder) Kick(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()

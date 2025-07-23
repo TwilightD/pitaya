@@ -113,6 +113,7 @@ type (
 		String() string
 		GetStatus() int32
 		Kick(ctx context.Context) error
+		KickWithType(ctx context.Context, kickType int32) error
 		SetLastAt()
 		SetStatus(state int32)
 		Handle()
@@ -425,7 +426,16 @@ func (a *agentImpl) GetStatus() int32 {
 
 // Kick sends a kick packet to a client
 func (a *agentImpl) Kick(ctx context.Context) error {
-	p, err := a.encoder.Encode(packet.Kick, nil)
+	return a.KickWithType(ctx, 0)
+}
+
+// KickWithType sends a kick packet to a client with a specific type
+func (a *agentImpl) KickWithType(ctx context.Context, kickType int32) error {
+	var kickTypeBytes []byte
+	if kickType == 0 {
+		kickTypeBytes = []byte{byte(kickType)}
+	}
+	p, err := a.encoder.Encode(packet.Kick, kickTypeBytes)
 	if err != nil {
 		return fmt.Errorf("agent kick failed: %w", err)
 	}
