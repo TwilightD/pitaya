@@ -51,7 +51,7 @@ type (
 	Hooks struct {
 		BeforeHandler *Channel
 		AfterHandler  *AfterChannel
-		PcallWrapper  func(method reflect.Method, args []reflect.Value, serializer serialize.Serializer) (rets interface{}, serRet []byte, err error)
+		PcallWrapper  func(method reflect.Method, args []reflect.Value, serializer serialize.Serializer) (rets interface{}, err error)
 	}
 
 	HandlerHooks struct {

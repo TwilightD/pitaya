@@ -93,9 +93,8 @@ func (h *HandlerPool) ProcessHandlerMessage(
 	}
 
 	var resp interface{}
-	var pcallSerRet []byte
 	if handlerHooks.Hooks.PcallWrapper != nil {
-		resp, pcallSerRet, err = handlerHooks.Hooks.PcallWrapper(handler.Method, args, serializer)
+		resp, err = handlerHooks.Hooks.PcallWrapper(handler.Method, args, serializer)
 	} else {
 		resp, err = util.Pcall(handler.Method, args)
 	}
@@ -115,14 +114,10 @@ func (h *HandlerPool) ProcessHandlerMessage(
 
 	var ret []byte
 	if msgType != message.Notify {
-		if pcallSerRet == nil {
-			ret, err = serializeReturn(serializer, resp)
-			if err != nil {
-				logger.Errorf("method %s failed to serialize return, error: %s", handler.Method, err.Error())
-				return nil, err
-			}
-		} else {
-			ret = pcallSerRet
+		ret, err = serializeReturn(serializer, resp)
+		if err != nil {
+			logger.Errorf("method %s failed to serialize return, error: %s", handler.Method, err.Error())
+			return nil, err
 		}
 	}
 
