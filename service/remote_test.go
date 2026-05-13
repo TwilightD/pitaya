@@ -215,9 +215,10 @@ func TestRemoteServiceKickUser(t *testing.T) {
 
 	existingUID := "uid1"
 	nonexistingUID := "uid2"
+	kickType := int32(123)
 
 	mockSession := sessionmocks.NewMockSession(ctrl)
-	mockSession.EXPECT().Kick(context.Background()).Times(1)
+	mockSession.EXPECT().KickWithType(context.Background(), kickType).Times(1)
 
 	mockSessionPool.EXPECT().GetSessionByUID(existingUID).Return(mockSession).Times(1)
 	mockSessionPool.EXPECT().GetSessionByUID(nonexistingUID).Return(nil).Times(1)
@@ -232,7 +233,8 @@ func TestRemoteServiceKickUser(t *testing.T) {
 		err  error
 	}{
 		{"success", existingUID, mockSession, &protos.KickMsg{
-			UserId: existingUID,
+			UserId:   existingUID,
+			KickType: kickType,
 		}, nil},
 		{"sessionNotFound", nonexistingUID, nil, &protos.KickMsg{
 			UserId: nonexistingUID,

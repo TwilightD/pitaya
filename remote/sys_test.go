@@ -176,16 +176,17 @@ func TestKick(t *testing.T) {
 	defer ctrl.Finish()
 
 	uid := uuid.New().String()
+	kickType := int32(123)
 
 	ss := mocks.NewMockSession(ctrl)
-	ss.EXPECT().Kick(nil).Return(nil)
+	ss.EXPECT().KickWithType(nil, kickType).Return(nil)
 
 	sessionPool := mocks.NewMockSessionPool(ctrl)
 	sessionPool.EXPECT().GetSessionByUID(uid).Return(ss).Times(1)
 
 	s := NewSys(sessionPool)
 
-	res, err := s.Kick(nil, &protos.KickMsg{UserId: uid})
+	res, err := s.Kick(nil, &protos.KickMsg{UserId: uid, KickType: kickType})
 	assert.NoError(t, err)
 	assert.True(t, res.Kicked)
 }

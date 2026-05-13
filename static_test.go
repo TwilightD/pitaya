@@ -511,6 +511,23 @@ func TestStaticSendKickToUsers(t *testing.T) {
 	}
 }
 
+func TestStaticSendKickToUsersWithType(t *testing.T) {
+	ctrl := gomock.NewController(t)
+
+	app := mocks.NewMockPitaya(ctrl)
+	uids := []string{"member"}
+	frontendType := "frontendType"
+	kickType := int32(123)
+	returned := []string{"returned"}
+	errExpected := errors.New("error")
+	app.EXPECT().SendKickToUsersWithType(uids, frontendType, kickType).Return(returned, errExpected)
+
+	DefaultApp = app
+	actual, err := SendKickToUsersWithType(uids, frontendType, kickType)
+	require.Equal(t, errExpected, err)
+	require.Equal(t, returned, actual)
+}
+
 func TestStaticGroupCreate(t *testing.T) {
 	ctx := context.Background()
 	groupName := "group"

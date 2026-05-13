@@ -49,8 +49,8 @@ func TestSendKickToUsersLocalSession(t *testing.T) {
 
 	s1 := sessionmocks.NewMockSession(ctrl)
 	s2 := sessionmocks.NewMockSession(ctrl)
-	s1.EXPECT().Kick(context.Background()).Times(1).Return(table.err)
-	s2.EXPECT().Kick(context.Background()).Times(1).Return(table.err)
+	s1.EXPECT().KickWithType(context.Background(), int32(0)).Times(1).Return(table.err)
+	s2.EXPECT().KickWithType(context.Background(), int32(0)).Times(1).Return(table.err)
 
 	mockSessionPool := sessionmocks.NewMockSessionPool(ctrl)
 	mockSessionPool.EXPECT().GetSessionByUID(table.uid1).Return(s1).Times(1)
@@ -80,7 +80,7 @@ func TestSendKickToUsersFail(t *testing.T) {
 	defer ctrl.Finish()
 
 	s1 := sessionmocks.NewMockSession(ctrl)
-	s1.EXPECT().Kick(context.Background()).Times(1).Return(nil)
+	s1.EXPECT().KickWithType(context.Background(), int32(0)).Times(1).Return(nil)
 
 	mockSessionPool := sessionmocks.NewMockSessionPool(ctrl)
 	mockSessionPool.EXPECT().GetSessionByUID(table.uid1).Return(s1).Times(1)
@@ -137,4 +137,42 @@ func TestSendKickToUsersRemoteSession(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSendKickToUsersWithType(t *testing.T) {
+	table := struct {
+		uid1         string
+		uid2         string
+		frontendType string
+		kickType     int32
+	}{
+		uuid.New().String(), uuid.New().String(), "connector", 123,
+	}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	s1 := sessionmocks.NewMockSession(ctrl)
+	s1.EXPECT().KickWithType(context.Background(), table.kickType).Times(1).Return(nil)
+
+	mockSessionPool := sessionmocks.NewMockSessionPool(ctrl)
+	mockSessionPool.EXPECT().GetSessionByUID(table.uid1).Return(s1).Times(1)
+	mockSessionPool.EXPECT().GetSessionByUID(table.uid2).Return(nil).Times(1)
+
+	mockRPCClient := clustermocks.NewMockRPCClient(ctrl)
+	mockRPCClient.EXPECT().SendKick(
+		table.uid2,
+		table.frontendType,
+		&protos.KickMsg{UserId: table.uid2, KickType: table.kickType},
+	).Return(nil).Times(1)
+
+	config := config.NewDefaultPitayaConfig()
+	builder := NewDefaultBuilder(true, "testtype", Cluster, map[string]string{}, *config)
+	builder.SessionPool = mockSessionPool
+	builder.RPCClient = mockRPCClient
+	app := builder.Build()
+
+	failedUids, err := app.SendKickToUsersWithType([]string{table.uid1, table.uid2}, table.frontendType, table.kickType)
+	assert.Nil(t, failedUids)
+	assert.NoError(t, err)
 }

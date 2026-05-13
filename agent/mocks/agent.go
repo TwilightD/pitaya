@@ -140,6 +140,12 @@ func (mr *MockAgentMockRecorder) Kick(arg0 interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Kick", reflect.TypeOf((*MockAgent)(nil).Kick), arg0)
 }
 
+// KickWithType indicates an expected call of KickWithType.
+func (mr *MockAgentMockRecorder) KickWithType(arg0, arg1 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "KickWithType", reflect.TypeOf((*MockAgent)(nil).KickWithType), arg0, arg1)
+}
+
 // Push mocks base method.
 func (m *MockAgent) Push(arg0 string, arg1 interface{}) error {
 	m.ctrl.T.Helper()

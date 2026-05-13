@@ -550,6 +550,21 @@ func (mr *MockPitayaMockRecorder) SendKickToUsers(arg0, arg1 interface{}) *gomoc
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendKickToUsers", reflect.TypeOf((*MockPitaya)(nil).SendKickToUsers), arg0, arg1)
 }
 
+// SendKickToUsersWithType mocks base method.
+func (m *MockPitaya) SendKickToUsersWithType(arg0 []string, arg1 string, arg2 int32) ([]string, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SendKickToUsersWithType", arg0, arg1, arg2)
+	ret0, _ := ret[0].([]string)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// SendKickToUsersWithType indicates an expected call of SendKickToUsersWithType.
+func (mr *MockPitayaMockRecorder) SendKickToUsersWithType(arg0, arg1, arg2 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendKickToUsersWithType", reflect.TypeOf((*MockPitaya)(nil).SendKickToUsersWithType), arg0, arg1, arg2)
+}
+
 // SendPushToUsers mocks base method.
 func (m *MockPitaya) SendPushToUsers(arg0 string, arg1 interface{}, arg2 []string, arg3 string) ([]string, error) {
 	m.ctrl.T.Helper()

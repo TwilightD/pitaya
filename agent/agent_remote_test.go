@@ -28,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/golang/mock/gomock"
+	"github.com/golang/protobuf/proto"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/topfreegames/pitaya/v2/cluster"
@@ -182,9 +183,16 @@ func TestKickRemote(t *testing.T) {
 
 	mockSD.EXPECT().GetServer(frontID)
 	c := context.Background()
+	kickType := int32(123)
 	r, _ := route.Decode("sys.kick")
-	rpcClient.EXPECT().Call(c, protos.RPCType_User, r, gomock.Nil(), gomock.Any(), gomock.Nil())
-	err = remote.Kick(c)
+	rpcClient.EXPECT().Call(c, protos.RPCType_User, r, gomock.Nil(), gomock.Any(), gomock.Nil()).Do(
+		func(_ context.Context, _ protos.RPCType, _ *route.Route, _ map[string]interface{}, msg *message.Message, _ *cluster.Server) {
+			kick := &protos.KickMsg{}
+			assert.NoError(t, proto.Unmarshal(msg.Data, kick))
+			assert.Equal(t, ss.Uid, kick.GetUserId())
+			assert.Equal(t, kickType, kick.GetKickType())
+		})
+	err = remote.KickWithType(c, kickType)
 
 	assert.NoError(t, err)
 }

@@ -159,6 +159,10 @@ func SendKickToUsers(uids []string, frontendType string) ([]string, error) {
 	return DefaultApp.SendKickToUsers(uids, frontendType)
 }
 
+func SendKickToUsersWithType(uids []string, frontendType string, kickType int32) ([]string, error) {
+	return DefaultApp.SendKickToUsersWithType(uids, frontendType, kickType)
+}
+
 func GroupCreate(ctx context.Context, groupName string) error {
 	return DefaultApp.GroupCreate(ctx, groupName)
 }

@@ -13,6 +13,7 @@ type NetworkEntity interface {
 	ResponseMID(ctx context.Context, mid uint, v interface{}, isError ...bool) error
 	Close() error
 	Kick(ctx context.Context) error
+	KickWithType(ctx context.Context, kickType int32) error
 	RemoteAddr() net.Addr
 	SendRequest(ctx context.Context, serverID, route string, v interface{}) (*protos.Response, error)
 }

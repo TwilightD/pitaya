@@ -556,7 +556,8 @@ func TestDocumentation(t *testing.T) {
 			},
 			"testtype.sys.kick": map[string]interface{}{
 				"input": map[string]interface{}{
-					"userId": "string",
+					"kickType": "int32",
+					"userId":   "string",
 				},
 				"output": []interface{}{
 					map[string]interface{}{
@@ -621,7 +622,8 @@ func TestDocumentationTrue(t *testing.T) {
 			"testtype.sys.kick": map[string]interface{}{
 				"input": map[string]interface{}{
 					"*protos.KickMsg": map[string]interface{}{
-						"userId": "string",
+						"kickType": "int32",
+						"userId":   "string",
 					},
 				},
 				"output": []interface{}{map[string]interface{}{

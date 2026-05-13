@@ -23,6 +23,7 @@ package client
 import (
 	"bytes"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,6 +73,7 @@ type Client struct {
 	packetDecoder       codec.PacketDecoder
 	packetChan          chan *packet.Packet
 	IncomingMsgChan     chan *message.Message
+	KickChan            chan int32
 	pendingChan         chan bool
 	pendingRequests     map[uint]*pendingRequest
 	pendingReqMutex     sync.Mutex
@@ -85,6 +87,11 @@ type Client struct {
 // MsgChannel return the incoming message channel
 func (c *Client) MsgChannel() chan *message.Message {
 	return c.IncomingMsgChan
+}
+
+// KickChannel returns the channel that receives application-defined kick types.
+func (c *Client) KickChannel() chan int32 {
+	return c.KickChan
 }
 
 // ConnectedStatus return the connection status
@@ -110,6 +117,7 @@ func New(logLevel logrus.Level, requestTimeout ...time.Duration) *Client {
 		packetEncoder:   codec.NewPomeloPacketEncoder(),
 		packetDecoder:   codec.NewPomeloPacketDecoder(),
 		packetChan:      make(chan *packet.Packet, 10),
+		KickChan:        make(chan int32, 10),
 		pendingRequests: make(map[uint]*pendingRequest),
 		requestTimeout:  reqTimeout,
 		// 30 here is the limit of inflight messages
@@ -260,12 +268,31 @@ func (c *Client) handlePackets() {
 				}
 				c.IncomingMsgChan <- m
 			case packet.Kick:
-				logger.Log.Warn("got kick packet from the server! disconnecting...")
+				kickType := decodeKickType(p.Data)
+				logger.Log.Warnf("got kick packet from the server with type %d! disconnecting...", kickType)
+				select {
+				case c.KickChan <- kickType:
+				default:
+				}
 				c.Disconnect()
 			}
 		case <-c.closeChan:
 			return
 		}
+	}
+}
+
+func decodeKickType(data []byte) int32 {
+	switch len(data) {
+	case 0:
+		return 0
+	case 1:
+		return int32(data[0])
+	default:
+		if len(data) >= 4 {
+			return int32(binary.BigEndian.Uint32(data[:4]))
+		}
+		return 0
 	}
 }
 

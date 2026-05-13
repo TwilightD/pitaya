@@ -220,7 +220,7 @@ func (r *RemoteService) KickUser(ctx context.Context, kick *protos.KickMsg) (*pr
 	logger.Log.Debugf("sending kick to user %s", kick.GetUserId())
 	s := r.sessionPool.GetSessionByUID(kick.GetUserId())
 	if s != nil {
-		err := s.Kick(ctx)
+		err := s.KickWithType(ctx, kick.GetKickType())
 		if err != nil {
 			return nil, err
 		}

@@ -89,11 +89,17 @@ func NewRemote(
 
 // Kick kicks the user
 func (a *Remote) Kick(ctx context.Context) error {
+	return a.KickWithType(ctx, 0)
+}
+
+// KickWithType kicks the user with an application-defined kick type.
+func (a *Remote) KickWithType(ctx context.Context, kickType int32) error {
 	if a.Session.UID() == "" {
 		return constants.ErrNoUIDBind
 	}
 	b, err := proto.Marshal(&protos.KickMsg{
-		UserId: a.Session.UID(),
+		UserId:   a.Session.UID(),
+		KickType: kickType,
 	})
 	if err != nil {
 		return err

@@ -22,6 +22,7 @@ package agent
 
 import (
 	"context"
+	"encoding/binary"
 	gojson "encoding/json"
 	e "errors"
 	"fmt"
@@ -431,10 +432,8 @@ func (a *agentImpl) Kick(ctx context.Context) error {
 
 // KickWithType sends a kick packet to a client with a specific type
 func (a *agentImpl) KickWithType(ctx context.Context, kickType int32) error {
-	var kickTypeBytes []byte
-	if kickType == 0 {
-		kickTypeBytes = []byte{byte(kickType)}
-	}
+	kickTypeBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(kickTypeBytes, uint32(kickType))
 	p, err := a.encoder.Encode(packet.Kick, kickTypeBytes)
 	if err != nil {
 		return fmt.Errorf("agent kick failed: %w", err)

@@ -73,7 +73,7 @@ func (s *Sys) Kick(ctx context.Context, msg *protos.KickMsg) (*protos.KickAnswer
 	if sess == nil {
 		return res, constants.ErrSessionNotFound
 	}
-	err := sess.Kick(ctx)
+	err := sess.KickWithType(ctx, msg.GetKickType())
 	if err != nil {
 		return res, err
 	}

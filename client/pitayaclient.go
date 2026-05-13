@@ -33,6 +33,7 @@ type PitayaClient interface {
 	ConnectToWS(addr string, path string, tlsConfig ...*tls.Config) error
 	ConnectedStatus() bool
 	Disconnect()
+	KickChannel() chan int32
 	MsgChannel() chan *message.Message
 	SendNotify(route string, data []byte) error
 	SendRequest(route string, data []byte) (uint, error)

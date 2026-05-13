@@ -22,6 +22,7 @@ package agent
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -144,9 +145,10 @@ func TestKick(t *testing.T) {
 	// Mock the handshake and heartbeat encoding that happens during agent creation
 	heartbeatAndHandshakeMocks(mockEncoder)
 
-	mockEncoder.EXPECT().Encode(gomock.Any(), gomock.Nil()).Do(
+	mockEncoder.EXPECT().Encode(gomock.Any(), gomock.Any()).Do(
 		func(typ packet.Type, d []byte) {
 			assert.EqualValues(t, packet.Kick, typ)
+			assert.Equal(t, int32(0), int32(binary.BigEndian.Uint32(d)))
 		})
 	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
 	mockConn.EXPECT().Write(gomock.Any()).Return(0, nil)
@@ -161,6 +163,40 @@ func TestKick(t *testing.T) {
 	ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, writeTimeout, 10, dieChan, messageEncoder, nil, sessionPool)
 	c := context.Background()
 	err := ag.Kick(c)
+	assert.NoError(t, err)
+}
+
+func TestKickWithType(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSerializer := serializemocks.NewMockSerializer(ctrl)
+	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
+	mockDecoder := codecmocks.NewMockPacketDecoder(ctrl)
+	dieChan := make(chan bool)
+	hbTime := time.Second
+	writeTimeout := time.Second
+	kickType := int32(123)
+
+	mockConn := mocks.NewMockPlayerConn(ctrl)
+
+	heartbeatAndHandshakeMocks(mockEncoder)
+
+	mockEncoder.EXPECT().Encode(gomock.Any(), gomock.Any()).Do(
+		func(typ packet.Type, d []byte) {
+			assert.EqualValues(t, packet.Kick, typ)
+			assert.Equal(t, kickType, int32(binary.BigEndian.Uint32(d)))
+		})
+	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
+	mockConn.EXPECT().Write(gomock.Any()).Return(0, nil)
+	mockConn.EXPECT().RemoteAddr().AnyTimes().Return(&mockAddr{})
+
+	messageEncoder := message.NewMessagesEncoder(false)
+	mockSerializer.EXPECT().GetName()
+
+	sessionPool := session.NewSessionPool()
+	ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, writeTimeout, 10, dieChan, messageEncoder, nil, sessionPool)
+	err := ag.KickWithType(context.Background(), kickType)
 	assert.NoError(t, err)
 }
 
@@ -213,7 +249,7 @@ func TestKickEncodeError(t *testing.T) {
 	// We need to add explicit expectations for these encode calls as they are called by newAgent with once.Do(). So these calls might not happen when running multiple tests simultaneously.
 	mockEncoder.EXPECT().Encode(packet.Type(packet.Handshake), gomock.Any()).Return([]byte{}, nil).AnyTimes()
 	mockEncoder.EXPECT().Encode(packet.Type(packet.Heartbeat), gomock.Any()).Return([]byte{}, nil).AnyTimes()
-	mockEncoder.EXPECT().Encode(packet.Type(packet.Kick), nil).Return(nil, assert.AnError)
+	mockEncoder.EXPECT().Encode(packet.Type(packet.Kick), gomock.Any()).Return(nil, assert.AnError)
 	messageEncoder := message.NewMessagesEncoder(false)
 
 	mockSerializer.EXPECT().GetName()
@@ -276,7 +312,7 @@ func TestKickNetworkErrors(t *testing.T) {
 			heartbeatAndHandshakeMocks(mockEncoder)
 
 			// Mock the kick packet encoding
-			mockEncoder.EXPECT().Encode(packet.Type(packet.Kick), nil).Return([]byte{}, nil)
+			mockEncoder.EXPECT().Encode(packet.Type(packet.Kick), gomock.Any()).Return([]byte{}, nil)
 
 			// Mock the write operation that will fail
 			mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)

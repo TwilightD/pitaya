@@ -58,10 +58,24 @@ func (m *MockNetworkEntity) Kick(arg0 context.Context) error {
 	return ret0
 }
 
+// KickWithType mocks base method.
+func (m *MockNetworkEntity) KickWithType(arg0 context.Context, arg1 int32) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "KickWithType", arg0, arg1)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
 // Kick indicates an expected call of Kick.
 func (mr *MockNetworkEntityMockRecorder) Kick(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Kick", reflect.TypeOf((*MockNetworkEntity)(nil).Kick), arg0)
+}
+
+// KickWithType indicates an expected call of KickWithType.
+func (mr *MockNetworkEntityMockRecorder) KickWithType(arg0, arg1 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "KickWithType", reflect.TypeOf((*MockNetworkEntity)(nil).KickWithType), arg0, arg1)
 }
 
 // Push mocks base method.

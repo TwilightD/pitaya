@@ -133,6 +133,7 @@ type Session interface {
 	SetFrontendData(frontendID string, frontendSessionID int64)
 	Bind(ctx context.Context, uid string) error
 	Kick(ctx context.Context) error
+	KickWithType(ctx context.Context, kickType int32) error
 	OnClose(c func()) error
 	Close()
 	RemoteAddr() net.Addr
@@ -469,7 +470,12 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string) error {
 
 // Kick kicks the user
 func (s *sessionImpl) Kick(ctx context.Context) error {
-	err := s.entity.Kick(ctx)
+	return s.KickWithType(ctx, 0)
+}
+
+// KickWithType kicks the user with an application-defined kick type.
+func (s *sessionImpl) KickWithType(ctx context.Context, kickType int32) error {
+	err := s.entity.KickWithType(ctx, kickType)
 	if err != nil {
 		return err
 	}

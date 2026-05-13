@@ -210,9 +210,23 @@ func TestKick(t *testing.T) {
 	sessionPool := NewSessionPool()
 	ss := sessionPool.NewSession(entity, true)
 	c := context.Background()
-	entity.EXPECT().Kick(c)
+	entity.EXPECT().KickWithType(c, int32(0))
 	entity.EXPECT().Close()
 	err := ss.Kick(c)
+	assert.NoError(t, err)
+}
+
+func TestKickWithType(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	entity := mocks.NewMockNetworkEntity(ctrl)
+	sessionPool := NewSessionPool()
+	ss := sessionPool.NewSession(entity, true)
+	c := context.Background()
+	kickType := int32(123)
+	entity.EXPECT().KickWithType(c, kickType)
+	entity.EXPECT().Close()
+	err := ss.KickWithType(c, kickType)
 	assert.NoError(t, err)
 }
 
