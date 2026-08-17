@@ -374,6 +374,8 @@ func (app *App) Start() {
 		}
 	}
 
+	app.drainInFlightMessages()
+
 	app.Shutdown()
 	close(app.externalDieChan)
 	close(app.sgChan)
@@ -383,6 +385,31 @@ func (app *App) Start() {
 	app.sessionPool.CloseAll()
 	app.shutdownModules()
 	app.shutdownComponents()
+}
+
+// drainInFlightMessages stops taking in new work and gives the messages already
+// queued or being processed a bounded window to finish, so their side effects are
+// committed before modules run their final flush. Must run before sessionPool.CloseAll,
+// which closes the agents and makes any pending response silently dropped.
+// A grace period of zero disables draining entirely and keeps the previous behaviour.
+func (app *App) drainInFlightMessages() {
+	gracePeriod := app.config.Shutdown.GracePeriod
+	if gracePeriod <= 0 {
+		return
+	}
+
+	// Closing the listeners first keeps new connections away from a server that is
+	// already on its way out; the connections still open are drained below.
+	for _, acc := range app.acceptors {
+		acc.Stop()
+	}
+
+	start := time.Now()
+	if remaining := app.handlerService.Drain(gracePeriod); remaining > 0 {
+		logger.Log.Warnf("grace period of %v expired with %d messages still in flight, shutting down anyway", gracePeriod, remaining)
+		return
+	}
+	logger.Log.Infof("all in-flight messages drained in %v", time.Since(start))
 }
 
 func (app *App) listen() {

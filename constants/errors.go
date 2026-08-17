@@ -75,6 +75,7 @@ var (
 	ErrReplyShouldBePtr               = errors.New("reply must be a pointer")
 	ErrRequestOnNotify                = errors.New("tried to request a notify route")
 	ErrRouterNotInitialized           = errors.New("router is not initialized")
+	ErrServerDraining                 = errors.New("server is draining in-flight requests before shutdown")
 	ErrServerNotFound                 = errors.New("server not found")
 	ErrServiceDiscoveryNotInitialized = errors.New("service discovery client is not initialized")
 	ErrSessionAlreadyBound            = errors.New("session is already bound to an uid")

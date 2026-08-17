@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nuid"
@@ -58,6 +59,10 @@ var (
 	handlerType = "handler"
 )
 
+// drainPollInterval is how often Drain re-checks the in-flight count. Kept well
+// below any sensible grace period so draining returns as soon as it can.
+const drainPollInterval = 5 * time.Millisecond
+
 type (
 	// HandlerService service
 	HandlerService struct {
@@ -73,6 +78,9 @@ type (
 		agentFactory     agent.AgentFactory
 		handlerPool      *HandlerPool
 		handlers         map[string]*component.Handler // all handler method
+		draining         atomic.Bool                   // set once the app starts draining, stops accepting new messages
+		inflight         atomic.Int64                  // messages already queued or being processed
+		shutdownError    error                         // answered to messages rejected while draining
 	}
 
 	unhandledMessage struct {
@@ -95,8 +103,13 @@ func NewHandlerService(
 	metricsReporters []metrics.Reporter,
 	handlerHooks *pipeline.HandlerHooks,
 	handlerPool *HandlerPool,
+	shutdownError error,
 ) *HandlerService {
+	if shutdownError == nil {
+		shutdownError = e.NewError(constants.ErrServerDraining, e.ErrClosedRequest)
+	}
 	h := &HandlerService{
+		shutdownError:    shutdownError,
 		services:         make(map[string]*component.Service),
 		chLocalProcess:   make(chan unhandledMessage, localProcessBufferSize),
 		chRemoteProcess:  make(chan unhandledMessage, remoteProcessBufferSize),
@@ -126,10 +139,12 @@ func (h *HandlerService) Dispatch(thread int) {
 		case lm := <-h.chLocalProcess:
 			metrics.ReportMessageProcessDelayFromCtx(lm.ctx, h.metricsReporters, "local")
 			h.localProcess(lm.ctx, lm.agent, lm.route, lm.msg)
+			h.inflight.Add(-1)
 
 		case rm := <-h.chRemoteProcess:
 			metrics.ReportMessageProcessDelayFromCtx(rm.ctx, h.metricsReporters, "remote")
 			h.remoteService.remoteProcess(rm.ctx, nil, rm.agent, rm.route, rm.msg)
+			h.inflight.Add(-1)
 
 		case <-timer.GlobalTicker.C: // execute cron task
 			timer.Cron()
@@ -319,6 +334,16 @@ func (h *HandlerService) processMessage(a agent.Agent, msg *message.Message) {
 		r.SvType = h.server.Type
 	}
 
+	// Take the in-flight slot before reading the draining flag. The order matters:
+	// doing it the other way around leaves a window where the drainer reads a zero
+	// count and returns while this message is still on its way into the queue.
+	h.inflight.Add(1)
+	if h.draining.Load() {
+		h.inflight.Add(-1)
+		h.answerDraining(ctx, a, msg)
+		return
+	}
+
 	message := unhandledMessage{
 		ctx:   ctx,
 		agent: a,
@@ -331,8 +356,38 @@ func (h *HandlerService) processMessage(a agent.Agent, msg *message.Message) {
 		if h.remoteService != nil {
 			h.chRemoteProcess <- message
 		} else {
+			h.inflight.Add(-1)
 			logger.Log.Warnf("request made to another server type but no remoteService running")
 		}
+	}
+}
+
+// answerDraining replies to a message that arrived after the app started draining.
+// Notify messages carry no id to correlate an answer with, so they can only be dropped.
+func (h *HandlerService) answerDraining(ctx context.Context, a agent.Agent, msg *message.Message) {
+	if msg.Type == message.Notify {
+		logger.Log.Warnf("dropped notify to route %s, server is draining", msg.Route)
+		return
+	}
+	a.AnswerWithError(ctx, msg.ID, h.shutdownError)
+}
+
+// Drain stops accepting new messages and waits for the ones already queued or
+// being processed to finish. It returns the number of messages still in flight,
+// which is zero unless the timeout was reached first.
+func (h *HandlerService) Drain(timeout time.Duration) int64 {
+	h.draining.Store(true)
+
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := h.inflight.Load()
+		if remaining <= 0 {
+			return 0
+		}
+		if !time.Now().Before(deadline) {
+			return remaining
+		}
+		time.Sleep(drainPollInterval)
 	}
 }
 

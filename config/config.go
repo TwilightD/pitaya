@@ -48,6 +48,11 @@ type PitayaConfig struct {
 			Period  time.Duration `mapstructure:"period"`
 		} `mapstructure:"drain"`
 	} `mapstructure:"session"`
+	Shutdown struct {
+		// GracePeriod is how long the app waits for in-flight handler messages to
+		// finish after a shutdown signal. Set to 0 to disable draining entirely.
+		GracePeriod time.Duration `mapstructure:"graceperiod"`
+	} `mapstructure:"shutdown"`
 
 	Acceptor struct {
 		ProxyProtocol bool `mapstructure:"proxyprotocol"`
@@ -146,6 +151,11 @@ func NewDefaultPitayaConfig() *PitayaConfig {
 				Timeout: time.Duration(6 * time.Hour),
 				Period:  time.Duration(5 * time.Second),
 			},
+		},
+		Shutdown: struct {
+			GracePeriod time.Duration `mapstructure:"graceperiod"`
+		}{
+			GracePeriod: time.Duration(500 * time.Millisecond),
 		},
 		Metrics: *newDefaultMetricsConfig(),
 		Cluster: *newDefaultClusterConfig(),

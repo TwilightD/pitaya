@@ -43,6 +43,11 @@ type Builder struct {
 	Worker           *worker.Worker
 	RemoteHooks      *pipeline.RemoteHooks
 	HandlerHooks     *pipeline.HandlerHooks
+	// ShutdownError is answered to clients whose messages arrive after the app
+	// started draining. Applications should set it to their own business error so
+	// clients can tell "server is restarting, request was never executed" apart
+	// from a generic failure. When nil a generic pitaya error is used instead.
+	ShutdownError error
 }
 
 // PitayaBuilder Builder interface
@@ -247,6 +252,7 @@ func (builder *Builder) Build() Pitaya {
 		builder.MetricsReporters,
 		builder.HandlerHooks,
 		handlerPool,
+		builder.ShutdownError,
 	)
 
 	app := NewApp(
