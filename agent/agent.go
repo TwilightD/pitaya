@@ -66,6 +66,11 @@ var (
 
 const handlerType = "handler"
 
+// maxConsecutiveWriteTimeouts is how many write deadlines in a row a client may
+// miss before its agent is closed. Each one costs writeTimeout, so this bounds
+// how long a peer that stopped reading can keep its send buffer full.
+const maxConsecutiveWriteTimeouts = 3
+
 type (
 	agentImpl struct {
 		Session            session.Session // session
@@ -305,12 +310,54 @@ func (a *agentImpl) send(pendingMsg pendingMessage) (err error) {
 		pWrite.err = util.GetErrorFromPayload(a.serializer, m.Data)
 	}
 
+	return a.enqueueWrite(pWrite, pendingMsg.typ)
+}
+
+// enqueueWrite hands pWrite to the write goroutine, never blocking the caller.
+//
+// A full chSend means the write goroutine is stuck in conn.Write, i.e. the peer
+// stopped reading. Blocking here would propagate that single client's stall to
+// whoever called us - the shared handler dispatch goroutines and broadcast
+// loops - so backpressure is resolved locally instead, per message type:
+//
+//   - push/notify are best effort state updates, so they are dropped and
+//     counted; the next update supersedes them anyway.
+//   - a response cannot be dropped silently or the client would wait forever
+//     for a reply it will never get, so the agent is closed and the client is
+//     told through the broken connection to reconnect.
+func (a *agentImpl) enqueueWrite(pWrite pendingWrite, typ message.Type) error {
 	// chSend is never closed so we need this to don't block if agent is already closed
 	select {
 	case a.chSend <- pWrite:
+		return nil
 	case <-a.chDie:
+		return nil
+	default:
 	}
-	return
+
+	a.reportDroppedMessage(typ)
+
+	logger.Log.WithFields(map[string]interface{}{
+		"session_id":  a.Session.ID(),
+		"uid":         a.Session.UID(),
+		"remote_addr": a.conn.RemoteAddr().String(),
+		"type":        typ.String(),
+	}).Warnf("chSend is full, client is not reading")
+
+	if typ != message.Response {
+		return nil
+	}
+
+	a.Close()
+	return errors.NewError(constants.ErrBrokenPipe, errors.ErrClosedRequest)
+}
+
+func (a *agentImpl) reportDroppedMessage(typ message.Type) {
+	for _, mr := range a.metricsReporters {
+		if err := mr.ReportCount(metrics.DroppedAgentMessages, map[string]string{"type": typ.String()}, 1); err != nil {
+			logger.Log.Warnf("failed to report dropped agent message: %s", err.Error())
+		}
+	}
 }
 
 // GetSession returns the agent session
@@ -438,7 +485,7 @@ func (a *agentImpl) KickWithType(ctx context.Context, kickType int32) error {
 	if err != nil {
 		return fmt.Errorf("agent kick failed: %w", err)
 	}
-	if err := a.writeToConnection(ctx, p); err != nil {
+	if _, err := a.writeToConnection(ctx, p); err != nil {
 		// 1. Check for a closed connection (most likely scenario for a "dead connection")
 		if e.Is(err, net.ErrClosed) {
 			// Handle specifically: connection was already closed
@@ -586,33 +633,55 @@ func (a *agentImpl) write() {
 		a.Close()
 	}()
 
+	// A write deadline elapsing is survivable on its own - a phone briefly
+	// losing signal hits it - so the agent is kept alive, but a peer that keeps
+	// missing the deadline is gone for good and holds the whole send buffer
+	// hostage until it is dropped.
+	consecutiveWriteTimeouts := 0
+
 	for {
 		select {
 		case pWrite := <-a.chSend:
 			ctx, err, data := pWrite.ctx, pWrite.err, pWrite.data
 
-			writeErr := a.writeToConnection(ctx, data)
+			n, writeErr := a.writeToConnection(ctx, data)
 
 			tracing.FinishSpan(ctx, nil)
 
 			if writeErr != nil {
-				if e.Is(writeErr, os.ErrDeadlineExceeded) {
+				// A partial write truncates the packet stream: whatever is
+				// written next would be decoded as the tail of the unfinished
+				// packet, so only a full timeout with nothing written is
+				// recoverable.
+				if e.Is(writeErr, os.ErrDeadlineExceeded) && n == 0 {
+					consecutiveWriteTimeouts++
 					// Log the timeout error but continue processing
 					logger.Log.Warnf(
-						"Context deadline exceeded for write in conn (%s) | session (%s): %s",
-						a.conn.RemoteAddr(), a.Session.UID(), writeErr.Error(),
+						"Context deadline exceeded for write in conn (%s) | session (%s) | consecutive (%d): %s",
+						a.conn.RemoteAddr(), a.Session.UID(), consecutiveWriteTimeouts, writeErr.Error(),
 					)
-				} else {
-					err = errors.NewError(writeErr, errors.ErrClosedRequest)
-					logger.Log.Errorf(
-						"Failed to write in conn (%s) | session (%s): %s, agent will close",
-						a.conn.RemoteAddr(), a.Session.UID(), writeErr.Error(),
+
+					if consecutiveWriteTimeouts < maxConsecutiveWriteTimeouts {
+						metrics.ReportTimingFromCtx(ctx, a.metricsReporters, handlerType, err)
+						continue
+					}
+
+					writeErr = fmt.Errorf(
+						"%d consecutive write timeouts: %w", consecutiveWriteTimeouts, writeErr,
 					)
-					metrics.ReportTimingFromCtx(ctx, a.metricsReporters, handlerType, err)
-					// close agent if low-level conn broke during write
-					return
 				}
+
+				err = errors.NewError(writeErr, errors.ErrClosedRequest)
+				logger.Log.Errorf(
+					"Failed to write in conn (%s) | session (%s): %s, agent will close",
+					a.conn.RemoteAddr(), a.Session.UID(), writeErr.Error(),
+				)
+				metrics.ReportTimingFromCtx(ctx, a.metricsReporters, handlerType, err)
+				// close agent if low-level conn broke during write
+				return
 			}
+
+			consecutiveWriteTimeouts = 0
 
 			metrics.ReportTimingFromCtx(ctx, a.metricsReporters, handlerType, err)
 		case <-a.chStopWrite:
@@ -621,17 +690,20 @@ func (a *agentImpl) write() {
 	}
 }
 
-func (a *agentImpl) writeToConnection(ctx context.Context, data []byte) error {
+// writeToConnection returns the number of bytes handed to the connection along
+// with the error, because a caller can only tell a recoverable timeout from a
+// stream-corrupting partial write by looking at that count.
+func (a *agentImpl) writeToConnection(ctx context.Context, data []byte) (int, error) {
 	span := createConnectionSpan(ctx, a.conn, "conn write")
 	defer span.Finish()
 
 	a.conn.SetWriteDeadline(time.Now().Add(a.writeTimeout))
-	_, writeErr := a.conn.Write(data)
+	n, writeErr := a.conn.Write(data)
 	if writeErr != nil {
 		tracing.LogError(span, writeErr.Error())
-		return writeErr
+		return n, writeErr
 	}
-	return writeErr
+	return n, writeErr
 }
 
 func createConnectionSpan(ctx context.Context, conn net.Conn, op string) opentracing.Span {

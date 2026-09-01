@@ -299,6 +299,17 @@ func (p *PrometheusReporter) registerMetrics(
 		additionalLabelsKeys,
 	)
 
+	p.countReportersMap[DroppedAgentMessages] = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace:   "pitaya",
+			Subsystem:   "agent",
+			Name:        DroppedAgentMessages,
+			Help:        "the number of messages dropped because the client send buffer was full",
+			ConstLabels: constLabels,
+		},
+		append([]string{"type"}, additionalLabelsKeys...),
+	)
+
 	toRegister := make([]prometheus.Collector, 0)
 	for _, c := range p.countReportersMap {
 		toRegister = append(toRegister, c)

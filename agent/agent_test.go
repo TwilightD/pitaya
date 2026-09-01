@@ -1533,3 +1533,74 @@ func TestAgentWriteChSendWriteTimeout(t *testing.T) {
 	ag.chSend <- pendingWrite{ctx: ctx, data: expectedSecondPacket, err: nil}
 	wg.Wait()
 }
+
+func TestAgentSendDropsPushWhenBufferIsFull(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockConn := mocks.NewMockPlayerConn(ctrl)
+	mockConn.EXPECT().RemoteAddr().AnyTimes().Return(&mockAddr{})
+	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
+	heartbeatAndHandshakeMocks(mockEncoder)
+	mockSerializer := serializemocks.NewMockSerializer(ctrl)
+	mockSerializer.EXPECT().GetName()
+	messageEncoder := message.NewMessagesEncoder(false)
+
+	sessionPool := session.NewSessionPool()
+	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, time.Second, 1, nil, messageEncoder, nil, sessionPool).(*agentImpl)
+	assert.NotNil(t, ag)
+
+	// nothing consumes chSend, so the single slot stays taken
+	ag.chSend <- pendingWrite{}
+
+	mockSerializer.EXPECT().Marshal(nil).Return([]byte("ok"), nil)
+	mockEncoder.EXPECT().Encode(packet.Type(packet.Data), gomock.Any()).Return([]byte("ok"), nil)
+
+	done := make(chan error, 1)
+	go func() { done <- ag.send(pendingMessage{typ: message.Push, route: "some.route"}) }()
+
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("send blocked on a full chSend instead of dropping the push")
+	}
+
+	assert.Equal(t, 1, len(ag.chSend))
+	assert.NotEqual(t, constants.StatusClosed, ag.GetStatus())
+}
+
+func TestAgentSendClosesAgentWhenResponseCannotBeBuffered(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockConn := mocks.NewMockPlayerConn(ctrl)
+	mockConn.EXPECT().RemoteAddr().AnyTimes().Return(&mockAddr{})
+	mockConn.EXPECT().Close()
+	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
+	heartbeatAndHandshakeMocks(mockEncoder)
+	mockSerializer := serializemocks.NewMockSerializer(ctrl)
+	mockSerializer.EXPECT().GetName()
+	messageEncoder := message.NewMessagesEncoder(false)
+
+	sessionPool := session.NewSessionPool()
+	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, time.Second, 1, nil, messageEncoder, nil, sessionPool).(*agentImpl)
+	assert.NotNil(t, ag)
+
+	ag.chSend <- pendingWrite{}
+
+	mockSerializer.EXPECT().Marshal(nil).Return([]byte("ok"), nil)
+	mockEncoder.EXPECT().Encode(packet.Type(packet.Data), gomock.Any()).Return([]byte("ok"), nil)
+
+	done := make(chan error, 1)
+	go func() { done <- ag.send(pendingMessage{typ: message.Response, mid: 1}) }()
+
+	select {
+	case err := <-done:
+		assert.Error(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("send blocked on a full chSend instead of closing the agent")
+	}
+
+	assert.Equal(t, constants.StatusClosed, ag.GetStatus())
+}
